@@ -241,3 +241,30 @@ Bound <Control-Alt-W> -> Web Browser
 Bound <Control-Alt-KeyPress-W> -> Web Browser
 Bound <Control-Alt-KeyPress-w> -> Web Browser
 Bound <Control-Alt-w> -> Web Browser
+
+--- register_shortcuts called at 2026-03-21T17:23:08.572706 ---
+{"File Manager": "Ctrl+Alt+F", "Notepad": "Ctrl+Alt+N", "Terminal": "Ctrl+Alt+T", "Calculator": "Ctrl+Alt+C", "Settings": "Ctrl+Alt+S", "Web Browser": "Ctrl+Alt+W"}
+Bound <Control-Alt-f> -> File Manager
+Bound <Control-Alt-KeyPress-F> -> File Manager
+Bound <Control-Alt-KeyPress-f> -> File Manager
+Bound <Control-Alt-F> -> File Manager
+Bound <Control-Alt-N> -> Notepad
+Bound <Control-Alt-KeyPress-N> -> Notepad
+Bound <Control-Alt-n> -> Notepad
+Bound <Control-Alt-KeyPress-n> -> Notepad
+Bound <Control-Alt-t> -> Terminal
+Bound <Control-Alt-KeyPress-T> -> Terminal
+Bound <Control-Alt-T> -> Terminal
+Bound <Control-Alt-KeyPress-t> -> Terminal
+Bound <Control-Alt-C> -> Calculator
+Bound <Control-Alt-KeyPress-C> -> Calculator
+Bound <Control-Alt-KeyPress-c> -> Calculator
+Bound <Control-Alt-c> -> Calculator
+Bound <Control-Alt-s> -> Settings
+Bound <Control-Alt-KeyPress-s> -> Settings
+Bound <Control-Alt-KeyPress-S> -> Settings
+Bound <Control-Alt-S> -> Settings
+Bound <Control-Alt-KeyPress-w> -> Web Browser
+Bound <Control-Alt-W> -> Web Browser
+Bound <Control-Alt-w> -> Web Browser
+Bound <Control-Alt-KeyPress-W> -> Web Browser
