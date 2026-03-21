@@ -34,14 +34,7 @@
       "profiles": []
     },
     "resource_monitoring": true,
-    "focus_mode_allow_unsafe": true,
-    "login_panel_image": null,
-    "loading_logo_image": null,
-    "login_logo_image": null,
-    "login_sound": null,
-    "loading_sound": "C:\\Users\\User\\Downloads\\startup_theme.mp3",
-    "login_panel_scale": 1.0,
-    "login_panel_anchor": "center"
+    "focus_mode_allow_unsafe": true
   },
   "shortcuts": {
     "File Manager": "Ctrl+Alt+F",
