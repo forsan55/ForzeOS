@@ -1,7 +1,7 @@
 {
   "users": {
     "admin": {
-      "password": "$2b$12$joB1Hp5XI2eMoMC.f17Jf.2DEdqp/g8UkV.vOs1WPum51aJbTsClS",
+      "password": "3c2343744fb713838ee74d50cff438c7",
       "created": "2026-03-14T15:53:26.187509"
     }
   },
@@ -233,7 +233,19 @@
         }
       ]
     },
-    "desktop_settings": {}
+    "desktop_settings": {
+      "0": {
+        "d1_enabled": true,
+        "d1_value": "",
+        "d2_enabled": false,
+        "d2_value": ""
+      }
+    },
+    "companion_enabled": false,
+    "companion_position": {
+      "x": 1430,
+      "y": 708
+    }
   },
   "wallpapers": {
     "0": {

@@ -5,10 +5,28 @@ import random
 import re
 import tkinter as tk
 from tkinter import Toplevel, Frame, Label, Entry, Text, Scrollbar, Button
-from PIL import Image, ImageTk
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except Exception:
+    Image = None
+    ImageTk = None
+    PIL_AVAILABLE = False
+    # logger may not be configured yet; safe to create one earlier in file
+    try:
+        logger.warning('PIL not available: companion will use tkinter fallbacks for images')
+    except Exception:
+        pass
 from typing import TYPE_CHECKING
 import math
-import math_engine
+try:
+    import math_engine
+except Exception:
+    math_engine = None
+    try:
+        logger.warning('math_engine module not available; math features disabled')
+    except Exception:
+        pass
 # hint to analyzers but avoid importing at runtime to prevent unresolved import warnings
 if TYPE_CHECKING:
     # type-checker only: this helps editors like Pylance know the symbol exists
@@ -406,9 +424,20 @@ class DesktopCompanion:
 
     def _load_image(self, path):
         try:
-            img = Image.open(path).convert('RGBA')
-            img = img.resize((self.size, self.size), Image.LANCZOS)
-            return ImageTk.PhotoImage(img)
+            # Prefer PIL when available for robust PNG alpha support and resizing
+            if PIL_AVAILABLE and Image is not None and ImageTk is not None:
+                img = Image.open(path).convert('RGBA')
+                img = img.resize((self.size, self.size), Image.LANCZOS)
+                return ImageTk.PhotoImage(img)
+            # Fallback: try tk.PhotoImage which can load some formats on some platforms
+            try:
+                return tk.PhotoImage(file=path)
+            except Exception:
+                # Last resort: create an empty transparent PhotoImage placeholder
+                try:
+                    return tk.PhotoImage(width=self.size, height=self.size)
+                except Exception:
+                    return None
         except Exception:
             return None
 

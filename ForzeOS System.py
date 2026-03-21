@@ -1171,8 +1171,20 @@ def verify_password(p: str, h: str) -> bool:
     Supports bcrypt hashes and legacy md5 hex.
     """
     try:
-        if isinstance(h, str) and h.startswith('$2') and BCRYPT_AVAILABLE:
-            return bcrypt.checkpw(p.encode(), h.encode())
+        # If hash looks like a bcrypt hash (starts with $2), attempt to use bcrypt.
+        # Import bcrypt dynamically here so verification still works even if the
+        # module wasn't importable at module-import time (defensive).
+        if isinstance(h, str) and h.startswith('$2'):
+            try:
+                import bcrypt as _bcrypt
+                return _bcrypt.checkpw(p.encode(), h.encode())
+            except Exception:
+                # bcrypt not available or check failed; log and return False
+                try:
+                    logger.warning('bcrypt required to verify stored bcrypt hash but is not available')
+                except Exception:
+                    pass
+                return False
         # legacy md5
         return hashlib.md5(p.encode()).hexdigest() == h
     except Exception:
