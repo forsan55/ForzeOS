@@ -1,0 +1,61 @@
+{
+  "users": {
+    "admin": {
+      "password": "$2b$12$joB1Hp5XI2eMoMC.f17Jf.2DEdqp/g8UkV.vOs1WPum51aJbTsClS",
+      "created": "2026-03-14T15:53:26.187509"
+    }
+  },
+  "settings": {
+    "wallpaper_color": "#2C3E50",
+    "wallpaper_image": null,
+    "taskbar_position": "bottom",
+    "minimize_to_taskbar": true,
+    "auto_login": false,
+    "theme": "dark",
+    "companion_ai_personality": "Mizahi",
+    "start_menu_items": [
+      "Aggressive Focus"
+    ],
+    "login_wallpaper": "D:/indirmeler/grunge-paper-background.jpg"
+  },
+  "shortcuts": {
+    "File Manager": "Ctrl+Alt+F",
+    "Notepad": "Ctrl+Alt+N",
+    "Terminal": "Ctrl+Alt+T",
+    "Calculator": "Ctrl+Alt+C",
+    "Settings": "Ctrl+Alt+S",
+    "Web Browser": "Ctrl+Alt+W"
+  },
+  "mouse": {
+    "cursor": "arrow",
+    "cursor_theme": "default",
+    "custom_cursor": null,
+    "cursor_size": "medium",
+    "cursor_color": "#FFFFFF",
+    "double_click_speed": 400,
+    "single_click_open": false,
+    "wheel_scroll_lines": 3,
+    "wheel_horizontal": false,
+    "swap_buttons": false,
+    "middle_button_action": "paste",
+    "cursor_shadow": true,
+    "cursor_acceleration": 1.0,
+    "profiles": []
+  },
+  "desktop": {
+    "icon_positions": {},
+    "custom_icons": {},
+    "custom_apps": {
+      "ForzeOS Market": "d:\\forzeos\\forze_market.py"
+    },
+    "wallpaper": {
+      "image": null,
+      "color": "#2C3E50"
+    },
+    "removed_icons": {},
+    "trash": {},
+    "pinned_taskbar": [
+      "ForzeOS Market"
+    ]
+  }
+}

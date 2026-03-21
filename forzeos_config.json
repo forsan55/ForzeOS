@@ -1,0 +1,237 @@
+{
+  "users": {
+    "admin": {
+      "password": "$2b$12$joB1Hp5XI2eMoMC.f17Jf.2DEdqp/g8UkV.vOs1WPum51aJbTsClS",
+      "created": "2026-03-14T15:53:26.187509"
+    }
+  },
+  "settings": {
+    "wallpaper_color": "#2C3E50",
+    "wallpaper_image": null,
+    "taskbar_position": "bottom",
+    "minimize_to_taskbar": true,
+    "auto_login": false,
+    "theme": "dark",
+    "companion_ai_personality": "Mizahi",
+    "start_menu_items": [
+      "Aggressive Focus"
+    ],
+    "login_wallpaper": "D:/indirmeler/grunge-paper-background.jpg",
+    "mouse": {
+      "cursor": "arrow",
+      "cursor_theme": "default",
+      "custom_cursor": null,
+      "cursor_size": "medium",
+      "cursor_color": "#FFFFFF",
+      "double_click_speed": 400,
+      "single_click_open": false,
+      "wheel_scroll_lines": 3,
+      "wheel_horizontal": false,
+      "swap_buttons": false,
+      "middle_button_action": "paste",
+      "cursor_shadow": true,
+      "cursor_acceleration": 1.0,
+      "profiles": []
+    },
+    "resource_monitoring": true,
+    "focus_mode_allow_unsafe": true
+  },
+  "shortcuts": {
+    "File Manager": "Ctrl+Alt+F",
+    "Notepad": "Ctrl+Alt+N",
+    "Terminal": "Ctrl+Alt+T",
+    "Calculator": "Ctrl+Alt+C",
+    "Settings": "Ctrl+Alt+S",
+    "Web Browser": "Ctrl+Alt+W"
+  },
+  "desktop": {
+    "icon_positions": {
+      "File Manager": [
+        145,
+        40
+      ],
+      "Video Editor": [
+        945,
+        127
+      ]
+    },
+    "custom_icons": {},
+    "custom_apps": {
+      "ForzeOS Market": "d:\\forzeos\\forze_market.py"
+    },
+    "wallpaper": {
+      "image": null,
+      "color": "#2C3E50"
+    },
+    "removed_icons": {},
+    "trash": {},
+    "pinned_taskbar": [
+      "ForzeOS Market"
+    ],
+    "desktop_icon_positions": {
+      "0": {
+        "File Manager": [
+          145,
+          40
+        ],
+        "Video Editor": [
+          945,
+          127
+        ]
+      }
+    },
+    "icon_size": 64,
+    "wallpapers": {
+      "0": {
+        "image": null,
+        "color": "#2C3E50"
+      }
+    },
+    "desktops": {
+      "0": [
+        {
+          "name": "ForzeOS Market",
+          "path": "d:\\forzeos\\forze_market.py",
+          "icon": null
+        },
+        {
+          "name": "File Manager",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Notepad",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Calculator",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Terminal",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Paint",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Code Editor",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Settings",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Icon Manager",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Web Browser",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Snake Game",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Chess",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Web Browser",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "PDF Reader",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Gallery",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Music Player",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Music Studio",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Password Manager",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "File Encryption",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Network Scanner",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Tic-Tac-Toe",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Flappy Bird",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Math Tools",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Sticky Notes",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Social Media",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Video Player",
+          "path": "",
+          "icon": null
+        },
+        {
+          "name": "Video Editor",
+          "path": "",
+          "icon": null
+        }
+      ]
+    },
+    "desktop_settings": {}
+  },
+  "wallpapers": {
+    "0": {
+      "image": null,
+      "color": "#2C3E50"
+    }
+  }
+}
