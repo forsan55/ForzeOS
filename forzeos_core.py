@@ -275,6 +275,9 @@ def apply_live_settings(forze):
         win_op = cfg.get('opacity_window', cfg.get('window_opacity', 1.0))
         pop_op = cfg.get('opacity_popup', 0.95)
         task_op = cfg.get('opacity_taskbar', 1.0)
+        # support newer keys used by transparent_theme adapter
+        global_op = cfg.get('global_opacity', None)
+        taskbar_transparent = cfg.get('taskbar_transparent', None)
         try:
             win_op = float(win_op)
         except Exception:
@@ -285,8 +288,41 @@ def apply_live_settings(forze):
                 w.set_opacity(win_op)
             except Exception:
                 pass
+        # apply global/root opacity if requested (affects whole app)
+        try:
+            if global_op is not None and hasattr(forze, 'root') and hasattr(forze.root, 'wm_attributes'):
+                try:
+                    forze.root.wm_attributes('-alpha', float(global_op))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # update any known popup windows by scanning for Toplevels that are not managed
         # (best-effort; callers can also manually set)
+        # taskbar transparency: if requested, adjust the taskbar visual color so it appears translucent
+        try:
+            if taskbar_transparent and hasattr(forze, 'taskbar') and getattr(forze, 'taskbar') is not None:
+                # choose a visual color: prefer wallpaper_color then fallback to dark
+                try:
+                    vc = cfg.get('wallpaper_color') or getattr(forze, 'colors', {}).get('dark')
+                    # set an attribute used elsewhere to remember visual color
+                    try:
+                        setattr(forze, '_taskbar_visual_color', vc)
+                    except Exception:
+                        pass
+                    try:
+                        forze.taskbar.configure(bg=vc)
+                        for ch in getattr(forze, 'taskbar').winfo_children():
+                            try:
+                                ch.configure(bg=vc)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
     except Exception:
         pass
 

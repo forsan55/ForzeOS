@@ -1,0 +1,33 @@
+{
+  "timestamp": "2026-03-22T19:55:02.335714Z",
+  "transparent_theme": {
+    "enabled": true,
+    "theme": {
+      "engine": "simple",
+      "background": "#000000",
+      "alpha": 0.8,
+      "blur": 3,
+      "accent_colors": {
+        "primary": "#00FFFF",
+        "secondary": "#0B1922",
+        "text": "#E6FFFF"
+      },
+      "ui_overrides": {
+        "window_border": {
+          "color": "#00FFFF",
+          "width": 2,
+          "radius": 6
+        },
+        "font_family": "Inter, Noto Sans, Arial",
+        "font_size": 11,
+        "animations": {
+          "window_fade_ms": 240,
+          "hover_glow": true
+        }
+      }
+    }
+  },
+  "wallpaper_color": null,
+  "global_opacity": null,
+  "taskbar_transparent": null
+}

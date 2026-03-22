@@ -4493,6 +4493,43 @@ class ForzeOS:
         except Exception:
             logger.exception('open_audio_settings error')
 
+    def open_transparent_theme_settings(self):
+        """Open the Transparent Theme settings window.
+
+        Dynamically loads `forze_transparent_theme_settings.py` from the same
+        folder so the lightweight theme UI is only required when used.
+        """
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+            module_path = os.path.join(script_dir, 'forze_transparent_theme_settings.py')
+            if os.path.exists(module_path):
+                try:
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location('forze_transparent_theme_settings', module_path)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    parent = getattr(self, 'root', None)
+                    try:
+                        mod.TransparentThemeSettingsWindow(parent)
+                    except Exception:
+                        mod.TransparentThemeSettingsWindow(None)
+                    return
+                except Exception:
+                    logger.exception('Failed to import local forze_transparent_theme_settings')
+            # fallback to normal import
+            try:
+                import forze_transparent_theme_settings as ftts
+                parent = getattr(self, 'root', None)
+                ftts.TransparentThemeSettingsWindow(parent)
+            except Exception:
+                logger.exception('Failed to open transparent theme settings via import')
+                try:
+                    messagebox.showerror('Transparent Theme', 'Transparent theme settings module not available.')
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception('open_transparent_theme_settings error')
+
     def _apply_deferred_image(self, item_id, data_bytes, w, h):
         """Convert raw image bytes to a PhotoImage and apply to canvas item.
 
@@ -26837,6 +26874,21 @@ Sample gallery for demonstration.
                          bg=self.colors['bg'], fg=self.colors['fg']).pack()
                 tk.Button(audio_frame, text="Open Microphone Tester", bg=self.colors['accent'], fg='white',
                           width=24, command=lambda: self.open_audio_settings()).pack(pady=12)
+            except Exception:
+                logger.exception('Failed to add Audio tab to Settings')
+
+            # Transparent Theme tab (opens the lightweight theme settings window)
+            try:
+                theme_frame = tk.Frame(notebook, bg=self.colors['bg'])
+                notebook.add(theme_frame, text="Transparent Theme")
+                tk.Label(theme_frame, text="Transparent Theme:", bg=self.colors['bg'], fg=self.colors['fg'],
+                         font=('Arial', 12, 'bold')).pack(pady=10)
+                tk.Label(theme_frame, text="Load or manage lightweight transparent themes.",
+                         bg=self.colors['bg'], fg=self.colors['fg']).pack()
+                tk.Button(theme_frame, text="Open Transparent Theme Settings", bg=self.colors['accent'], fg='white',
+                          width=28, command=lambda: self.open_transparent_theme_settings()).pack(pady=12)
+            except Exception:
+                logger.exception('Failed to add Transparent Theme tab to Settings')
             except Exception:
                 logger.exception('Failed to add Audio tab to Settings')
 
