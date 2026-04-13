@@ -307,5 +307,59 @@
     "user": "admin",
     "result": "invalid_password",
     "count": 2
+  },
+  {
+    "time": "2026-04-13T21:44:10.051597",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-04-13T21:45:36.087862",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-04-13T22:38:17.068579",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-04-13T22:38:23.597476",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-04-13T22:38:26.775059",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-04-14T00:13:23.031292",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-04-14T00:13:28.180482",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-04-14T00:13:30.484959",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-04-14T00:40:01.427523",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-04-14T01:00:54.737586",
+    "user": "admin",
+    "result": "success"
   }
 ]

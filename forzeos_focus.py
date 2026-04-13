@@ -160,7 +160,23 @@ def _load_aggressive_dll():
         except Exception:
             return False
     try:
-        _aggressive = ctypes.WinDLL(path)
+        # Ensure ctypes is available here (function may be called before other imports)
+        import ctypes
+        last_exc = None
+        # Prefer WinDLL (stdcall) first since exported helpers may use __stdcall
+        try:
+            _aggressive = ctypes.WinDLL(path)
+            logger.info('Aggressive Focus native module loaded via WinDLL: %s', path)
+        except OSError as e_w:
+            last_exc = e_w
+            try:
+                # Fallback to CDLL (cdecl) if WinDLL fails
+                _aggressive = ctypes.CDLL(path)
+                logger.info('Aggressive Focus native module loaded via CDLL: %s', path)
+            except Exception as e_cdll:
+                last_exc = e_cdll
+                raise last_exc
+
         # optional prototypes
         try:
             _aggressive.aggressive_focus_start.argtypes = []
@@ -215,8 +231,9 @@ def _try_build_aggressive_dll() -> bool:
 
     gpp = shutil.which('g++') or shutil.which('mingw32-g++')
     if gpp:
-        # MinGW: g++ -shared -o forze_aggressive_focus.dll forze_aggressive_focus.cpp -lpsapi -static
-        cmd = [gpp, '-shared', '-o', out, src, '-lpsapi']
+        # MinGW: attempt a static-linked DLL to reduce external dependencies where possible
+        # Note: static linking may not always be possible on all toolchains; this is best-effort.
+        cmd = [gpp, '-shared', '-o', out, src, '-lpsapi', '-static', '-static-libgcc', '-static-libstdc++']
         try:
             logger.info('Attempting to build aggressive DLL with g++: %s', ' '.join(cmd))
             p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False, cwd=os.path.dirname(os.path.abspath(__file__)), timeout=120)
@@ -800,8 +817,10 @@ def _perform_focus_actions(instance, state: FocusModeState):
                             mem, pid, name = t
                             score = 0
                             lname = name.lower()
+                            # boost priority for known heavy/background apps so they are
+                            # considered earlier (blacklist override)
                             if any(b in lname for b in ('chrome','firefox','msedge','edge','spotify','discord','steam','epic','battle','riot','launcher','rgb','asus','razer','synapse','steelseries')):
-                                score -= 1000000000
+                                score += 1000000000
                             return (score, mem)
 
                         procs.sort(key=_proc_sort_key, reverse=True)
@@ -861,8 +880,9 @@ def _perform_focus_actions(instance, state: FocusModeState):
                                     # allow blacklisted names even if memory is smaller
                                     if mem < 150 * 1024 * 1024 and not any(b in name for b in user_blacklist):
                                         continue
-                                    has_win = _process_has_window(pid) if IS_WINDOWS else True
-                                    if not has_win:
+                                    has_win = _process_has_window(pid) if IS_WINDOWS else False
+                                    # skip interactive apps/games: if a process has a visible top-level window, skip it
+                                    if has_win:
                                         continue
                                     candidate = (mem, pid, name)
                                     break
