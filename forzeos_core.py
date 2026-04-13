@@ -758,10 +758,12 @@ def _get_windows_desktop_path():
     return Path.home() / 'Desktop'
 
 
-def create_windows_shortcut(target, shortcut_path, working_dir=None, icon=None, hotkey=None, description=''):
+def create_windows_shortcut(target, shortcut_path, working_dir=None, icon=None, hotkey=None, description='', open_in_console=False):
     """Create a Windows .lnk shortcut. Tries pywin32 (WScript.Shell) first, then winshell if available.
 
-    Returns True on success, False otherwise.
+    If `open_in_console` is True and the target is a Python script, the
+    created shortcut will launch `cmd.exe` with `/k ...` so a console stays
+    open for debugging. Returns True on success, False otherwise.
     """
     try:
         import shutil
@@ -781,15 +783,35 @@ def create_windows_shortcut(target, shortcut_path, working_dir=None, icon=None, 
             is_script = False
 
         if is_script:
-            # Prefer the py launcher, then pythonw/python; otherwise fall back to cmd+python
-            launcher = shutil.which('py') or shutil.which('pythonw.exe') or shutil.which('python.exe')
-            if launcher:
-                lnk_target = str(launcher)
-                lnk_args = f'"{targ_str}"'
+            # Detect available launchers
+            py_launcher = shutil.which('py')
+            py_exe = shutil.which('python.exe') or shutil.which('python')
+            pythonw = shutil.which('pythonw.exe')
+
+            if open_in_console:
+                # Launch via cmd.exe and keep console open (/k) so debugger/prints are visible
+                cmd_path = Path(os.environ.get('WINDIR', 'C:\\Windows')) / 'System32' / 'cmd.exe'
+                if py_launcher:
+                    inner = f'py -3 "{targ_str}"'
+                else:
+                    # Prefer a concrete python.exe if available, otherwise rely on plain 'python'
+                    if py_exe:
+                        launcher_cmd = f'"{py_exe}"' if ' ' in py_exe else py_exe
+                        inner = f'{launcher_cmd} "{targ_str}"'
+                    else:
+                        inner = f'python "{targ_str}"'
+                lnk_target = str(cmd_path)
+                lnk_args = f'/k {inner}'
             else:
-                # Use cmd.exe to invoke the user's python alias
-                lnk_target = str(Path(os.environ.get('WINDIR', 'C:\\Windows')) / 'System32' / 'cmd.exe')
-                lnk_args = f'/c python "{targ_str}"'
+                # Non-console behavior: prefer the py launcher, then pythonw, then python
+                launcher = py_launcher or pythonw or py_exe
+                if launcher:
+                    lnk_target = str(launcher)
+                    lnk_args = f'"{targ_str}"'
+                else:
+                    # Fallback to invoking python via cmd (non-interactive)
+                    lnk_target = str(Path(os.environ.get('WINDIR', 'C:\\Windows')) / 'System32' / 'cmd.exe')
+                    lnk_args = f'/c python "{targ_str}"'
         else:
             lnk_target = targ_str
             lnk_args = ''
@@ -836,12 +858,28 @@ def create_windows_shortcut(target, shortcut_path, working_dir=None, icon=None, 
                 import winshell
                 launcher = None
                 if is_script:
-                    launcher = shutil.which('py') or shutil.which('pythonw.exe') or shutil.which('python.exe')
-                    if launcher:
-                        winshell.CreateShortcut(str(shortcut_path), str(launcher), Arguments=f'"{targ_str}"', StartIn=str(working_dir) if working_dir else '', Icon=(str(icon) if icon else '', 0), Description=description)
-                    else:
+                    py_launcher = shutil.which('py')
+                    py_exe = shutil.which('python.exe') or shutil.which('python')
+                    pythonw = shutil.which('pythonw.exe')
+                    if open_in_console:
                         cmd = str(Path(os.environ.get('WINDIR', 'C:\\Windows')) / 'System32' / 'cmd.exe')
-                        winshell.CreateShortcut(str(shortcut_path), cmd, Arguments=f'/c python "{targ_str}"', StartIn=str(working_dir) if working_dir else '', Icon=(str(icon) if icon else '', 0), Description=description)
+                        if py_launcher:
+                            inner = f'py -3 "{targ_str}"'
+                            winshell.CreateShortcut(str(shortcut_path), cmd, Arguments=f'/k {inner}', StartIn=str(working_dir) if working_dir else '', Icon=(str(icon) if icon else '', 0), Description=description)
+                        else:
+                            if py_exe:
+                                launcher_cmd = f'"{py_exe}"' if ' ' in py_exe else py_exe
+                                inner = f'{launcher_cmd} "{targ_str}"'
+                            else:
+                                inner = f'python "{targ_str}"'
+                            winshell.CreateShortcut(str(shortcut_path), cmd, Arguments=f'/k {inner}', StartIn=str(working_dir) if working_dir else '', Icon=(str(icon) if icon else '', 0), Description=description)
+                    else:
+                        launcher = py_launcher or pythonw or py_exe
+                        if launcher:
+                            winshell.CreateShortcut(str(shortcut_path), str(launcher), Arguments=f'"{targ_str}"', StartIn=str(working_dir) if working_dir else '', Icon=(str(icon) if icon else '', 0), Description=description)
+                        else:
+                            cmd = str(Path(os.environ.get('WINDIR', 'C:\\Windows')) / 'System32' / 'cmd.exe')
+                            winshell.CreateShortcut(str(shortcut_path), cmd, Arguments=f'/c python "{targ_str}"', StartIn=str(working_dir) if working_dir else '', Icon=(str(icon) if icon else '', 0), Description=description)
                 else:
                     kw = {}
                     if working_dir:
@@ -926,7 +964,7 @@ def ensure_desktop_shortcut_prompt(name='ForzeOS', hotkey='Ctrl+Alt+F', icon_pat
                 icon = None
 
         def _create_shortcut():
-            ok = create_windows_shortcut(target=target, shortcut_path=shortcut_file, working_dir=target.parent if target.is_file() else None, icon=icon, hotkey=hotkey, description=name)
+            ok = create_windows_shortcut(target=target, shortcut_path=shortcut_file, working_dir=target.parent if target.is_file() else None, icon=icon, hotkey=hotkey, description=name, open_in_console=True)
             if ok:
                 logger.info('Desktop shortcut created: %s', shortcut_file)
             else:
@@ -1072,7 +1110,7 @@ def create_desktop_shortcut_and_persist(forze, name='ForzeOS', hotkey='Ctrl+Alt+
                             pass
                 except Exception:
                     pass
-                ok = create_windows_shortcut(target=target, shortcut_path=shortcut_file, working_dir=target.parent if target.is_file() else None, icon=icon, hotkey=hotkey, description=name)
+                ok = create_windows_shortcut(target=target, shortcut_path=shortcut_file, working_dir=target.parent if target.is_file() else None, icon=icon, hotkey=hotkey, description=name, open_in_console=True)
                 if ok:
                     try:
                         s = forze.config.setdefault('settings', {})
@@ -1116,7 +1154,7 @@ def create_desktop_shortcut_and_persist(forze, name='ForzeOS', hotkey='Ctrl+Alt+
             if not save_path:
                 return False
             chosen = Path(save_path)
-            ok = create_windows_shortcut(target=target, shortcut_path=chosen, working_dir=target.parent if target.is_file() else None, icon=icon, hotkey=hotkey, description=name)
+            ok = create_windows_shortcut(target=target, shortcut_path=chosen, working_dir=target.parent if target.is_file() else None, icon=icon, hotkey=hotkey, description=name, open_in_console=True)
             if ok:
                 try:
                     s = forze.config.setdefault('settings', {})
@@ -1138,7 +1176,7 @@ def create_desktop_shortcut_and_persist(forze, name='ForzeOS', hotkey='Ctrl+Alt+
             return bool(ok)
 
         # Not existing: create normally
-        ok = create_windows_shortcut(target=target, shortcut_path=shortcut_file, working_dir=target.parent if target.is_file() else None, icon=icon, hotkey=hotkey, description=name)
+        ok = create_windows_shortcut(target=target, shortcut_path=shortcut_file, working_dir=target.parent if target.is_file() else None, icon=icon, hotkey=hotkey, description=name, open_in_console=True)
         if ok:
             try:
                 s = forze.config.setdefault('settings', {})

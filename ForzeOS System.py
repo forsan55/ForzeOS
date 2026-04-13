@@ -153,6 +153,27 @@ try:
 except Exception:
     pass
 
+# Safe deletecommand wrapper: some Tk implementations may set
+# `_tclCommands = None` during shutdown; calling the original
+# `deletecommand` then raises AttributeError. Provide a defensive
+# wrapper to ignore deletes after interpreter teardown.
+_FORZEOS__orig_deletecommand = getattr(_tk.Misc, 'deletecommand', None)
+def _forzeos_deletecommand(self, name):
+    try:
+        if getattr(self, '_tclCommands', None) is None:
+            return None
+        if _FORZEOS__orig_deletecommand is None:
+            return None
+        return _FORZEOS__orig_deletecommand(self, name)
+    except Exception:
+        return None
+
+try:
+    if _FORZEOS__orig_deletecommand is not None:
+        _tk.Misc.deletecommand = _forzeos_deletecommand
+except Exception:
+    pass
+
 def forzeos_cancel_all_for_widget(widget):
     ids = list(_FORZEOS_AFTER_REGISTRY.get(widget, ()))
     for aid in ids:
