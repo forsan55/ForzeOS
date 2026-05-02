@@ -2078,10 +2078,28 @@ class ForzeOS:
         except Exception:
             self._forzeos_pygame_inited = getattr(self, '_forzeos_pygame_inited', False)
 
+        # Ensure numpy is available (required for synthesis and processing)
+        try:
+            if not NUMPY_AVAILABLE:
+                messagebox.showerror("Hata", "numpy yüklenmemiş! Music Studio çalışması için numpy gereklidir.")
+                return
+        except Exception:
+            # conservative: if NUMPY_AVAILABLE isn't defined for some reason, try using np
+            try:
+                import numpy as _np  # type: ignore
+            except Exception:
+                messagebox.showerror("Hata", "numpy bulunamadı; Music Studio çalıştırılamıyor.")
+                return
         # Create or reuse window
         self.music_window = self.create_window("🎶 Music Studio", 1100, 600)
         if not self.music_window:
             return
+
+        # protect delay buffer when used from playback/export threads
+        try:
+            self._music_delay_lock = threading.Lock()
+        except Exception:
+            self._music_delay_lock = None
 
         # Ensure we clean up heavy resources when the window is closed
         def _music_on_close():
@@ -2100,6 +2118,17 @@ class ForzeOS:
                     except Exception:
                         pass
                     self._forzeos_pygame_inited = False
+            except Exception:
+                pass
+            try:
+                if getattr(self, '_music_global_keybound', False):
+                    try:
+                        self.music_window.unbind_all('<Key>')
+                    except Exception:
+                        try:
+                            self.root.unbind_all('<Key>')
+                        except Exception:
+                            pass
             except Exception:
                 pass
             try:
@@ -2228,54 +2257,355 @@ class ForzeOS:
 
         tk.Button(left, text="Add Track", command=add_track, bg=self.colors['accent'], fg='white').pack(fill=tk.X, pady=2)
         tk.Button(left, text="Remove Track", command=remove_track, bg=self.colors['danger'], fg='white').pack(fill=tk.X)
+        
+        def clear_track():
+            sel = track_listbox.curselection()
+            if not sel:
+                messagebox.showinfo('Clear', 'Select a track first')
+                return
+            ti = sel[0]
+            self.music_tracks[ti]['grid'] = [[0 for _ in range(cols)] for _ in range(rows)]
+            rebuild_grid()
 
-        # Middle: piano-roll canvas
-        canvas_frame = tk.Frame(rootf, bg=self.colors['bg'])
+        def clear_all():
+            if not messagebox.askyesno('Clear All', 'Clear all tracks?'):
+                return
+            for t in self.music_tracks:
+                t['grid'] = [[0 for _ in range(cols)] for _ in range(rows)]
+            rebuild_grid()
+
+        tk.Button(left, text='Clear Track', command=clear_track, bg=self.colors['light']).pack(fill=tk.X, pady=2)
+        tk.Button(left, text='Clear All', command=clear_all, bg=self.colors['light']).pack(fill=tk.X)
+
+
+        # Middle: piano-roll canvas (high-performance Canvas-based sequencer)
+        canvas_frame = tk.Frame(rootf, bg='#1a1a1a')
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        grid_canvas = tk.Frame(canvas_frame, bg=self.colors['bg'])
-        grid_canvas.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(canvas_frame, bg='#1a1a1a', highlightthickness=0)
+        vbar = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # store button widgets per track per row/col
+        # mouse wheel support: bind while pointer is over canvas
+        def _on_mousewheel(ev):
+            try:
+                if sys.platform == 'darwin':
+                    delta = int(ev.delta)
+                else:
+                    delta = int(ev.delta / 120)
+                canvas.yview_scroll(-delta, 'units')
+            except Exception:
+                pass
+
+        def _bind_mousewheel(ev):
+            try:
+                canvas.bind_all('<MouseWheel>', _on_mousewheel)
+            except Exception:
+                pass
+
+        def _unbind_mousewheel(ev):
+            try:
+                canvas.unbind_all('<MouseWheel>')
+            except Exception:
+                pass
+
+        canvas.bind('<Enter>', _bind_mousewheel)
+        canvas.bind('<Leave>', _unbind_mousewheel)
+
+        # visual style
+        note_tag_prefix = 'note_'
+        neon_fill = '#39ff14'
+        neon_outline = '#00ffee'
+        grid_line_color = '#2a2a2a'
+        strong_grid_color = '#444444'
+
+        # lightweight compatibility placeholder (kept for legacy callers)
         track_buttons = []
 
+        # layout state will be stored on canvas for easy access
+        canvas._cell_w = 24
+        canvas._cell_h = 18
+
+        def _compute_layout():
+            num_tracks = len(self.music_tracks)
+            total_rows = rows * max(1, num_tracks)
+            w = max(120, canvas.winfo_width() or canvas.winfo_reqwidth())
+            # compute content height based on rows
+            content_h = max(80, total_rows * canvas._cell_h)
+            cell_w = max(8, int(w / max(1, cols)))
+            # prefer cell_h from content, but allow responsive scaling
+            cell_h = max(6, int((canvas.winfo_height() or 400) / max(1, total_rows)))
+            canvas._cell_w = cell_w
+            canvas._cell_h = cell_h
+            canvas._num_tracks = num_tracks
+            canvas._total_rows = total_rows
+            canvas._width = w
+            canvas._height = content_h
+
         def rebuild_grid():
-            # clear
-            for w in grid_canvas.winfo_children():
-                w.destroy()
-            track_buttons.clear()
+            canvas.delete('all')
+            _compute_layout()
+            cell_w = canvas._cell_w
+            cell_h = canvas._cell_h
+            content_w = cols * cell_w
+            content_h = canvas._total_rows * cell_h
 
-            cols_local = cols
-            for ti, track in enumerate(self.music_tracks):
-                tb = []
-                tk.Label(grid_canvas, text=track['name'], bg=self.colors['bg'], fg='white').grid(row=ti*rows, column=0)
-                for r in range(rows):
-                    row_widgets = []
-                    for c in range(cols_local):
-                        def make_cmd(ti, r, c):
-                            return lambda: toggle_cell(ti, r, c)
-                        b = tk.Button(grid_canvas, width=2, height=1, bg=self.colors['dark'], command=make_cmd(ti, r, c))
-                        b.grid(row=ti*rows + r, column=c+1, padx=1, pady=1)
-                        row_widgets.append(b)
-                    tb.append(row_widgets)
-                track_buttons.append(tb)
-            refresh_buttons()
+            # prepare note id map for fast updates
+            canvas._note_map = {}
 
-        def refresh_buttons():
+            # vertical grid lines (strong every 4 columns)
+            for c in range(cols + 1):
+                x = c * cell_w
+                color = strong_grid_color if (c % 4) == 0 else grid_line_color
+                canvas.create_line(x, 0, x, content_h, fill=color)
+
+            # horizontal separator lines
+            for rline in range(canvas._total_rows + 1):
+                y = rline * cell_h
+                canvas.create_line(0, y, content_w, y, fill=grid_line_color)
+
+            # draw notes and store ids for each cell key (ti, r, c)
             for ti, track in enumerate(self.music_tracks):
                 for r in range(rows):
                     for c in range(cols):
-                        val = track['grid'][r][c]
                         try:
-                            widget = track_buttons[ti][r][c]
-                            widget.config(bg='yellow' if val else self.colors['dark'])
+                            if track['grid'][r][c]:
+                                x0 = c * cell_w + 1
+                                y0 = (ti*rows + r) * cell_h + 1
+                                x1 = x0 + cell_w - 2
+                                y1 = y0 + cell_h - 2
+                                key = (ti, r, c)
+                                iid = canvas.create_rectangle(x0, y0, x1, y1, fill=neon_fill, outline=neon_outline, tags=('note', f'note_{ti}_{r}_{c}'))
+                                try:
+                                    canvas._note_map[key] = iid
+                                except Exception:
+                                    pass
+                        except Exception:
+                            continue
+
+            # playhead line (moved by animation)
+            canvas.create_line(0, 0, 0, content_h, fill=neon_fill, width=3, tags='playhead')
+            canvas.tag_lower('playhead')
+
+            # update scrollregion to cover full content
+            try:
+                canvas.config(scrollregion=(0, 0, content_w, content_h))
+            except Exception:
+                pass
+
+        def _cell_from_xy(x, y):
+            if x is None or y is None:
+                return None, None, None
+            cell_w = canvas._cell_w
+            cell_h = canvas._cell_h
+            c = int(x / cell_w)
+            row_global = int(y / cell_h)
+            ti = row_global // rows
+            r = row_global % rows
+            if ti < 0 or ti >= len(self.music_tracks) or r < 0 or r >= rows or c < 0 or c >= cols:
+                return None, None, None
+            return ti, r, c
+
+        _paint_mode = {'value': None}
+
+        def _set_cell(ti, r, c, val):
+            try:
+                if ti is None:
+                    return
+                grid = self.music_tracks[ti]['grid']
+                newv = 1 if val else 0
+                if grid[r][c] == newv:
+                    return
+                grid[r][c] = newv
+                # maintain a fast mapping from (track,row,col) -> canvas id
+                try:
+                    note_map = getattr(canvas, '_note_map', None)
+                    if note_map is None:
+                        canvas._note_map = {}
+                        note_map = canvas._note_map
+                except Exception:
+                    canvas._note_map = {}
+                    note_map = canvas._note_map
+
+                key = (ti, r, c)
+                if newv:
+                    if key not in note_map:
+                        x0 = c * canvas._cell_w + 1
+                        y0 = (ti*rows + r) * canvas._cell_h + 1
+                        x1 = x0 + canvas._cell_w - 2
+                        y1 = y0 + canvas._cell_h - 2
+                        try:
+                            iid = canvas.create_rectangle(x0, y0, x1, y1, fill=neon_fill, outline=neon_outline, tags=('note', f'note_{ti}_{r}_{c}'))
+                            note_map[key] = iid
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        iid = note_map.pop(key, None)
+                        if iid:
+                            canvas.delete(iid)
+                    except Exception:
+                        # fallback: try tag deletion (rare)
+                        try:
+                            tag = f'note_{ti}_{r}_{c}'
+                            for iid in canvas.find_withtag(tag):
+                                canvas.delete(iid)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        def _on_b1(event):
+            ti, r, c = _cell_from_xy(event.x, event.y)
+            if ti is None:
+                return
+            # toggle initial cell and set paint mode accordingly
+            current = bool(self.music_tracks[ti]['grid'][r][c])
+            val = not current
+            _paint_mode['value'] = 1 if val else 0
+            _set_cell(ti, r, c, _paint_mode['value'])
+
+        def _on_b1_motion(event):
+            if _paint_mode['value'] is None:
+                return
+            ti, r, c = _cell_from_xy(event.x, event.y)
+            if ti is None:
+                return
+            _set_cell(ti, r, c, _paint_mode['value'])
+
+        def _on_b1_up(event):
+            _paint_mode['value'] = None
+
+        def _on_b3(event):
+            ti, r, c = _cell_from_xy(event.x, event.y)
+            if ti is None:
+                return
+            _paint_mode['value'] = 0
+            _set_cell(ti, r, c, 0)
+
+        def _on_b3_motion(event):
+            if _paint_mode['value'] is None:
+                _paint_mode['value'] = 0
+            ti, r, c = _cell_from_xy(event.x, event.y)
+            if ti is None:
+                return
+            _set_cell(ti, r, c, 0)
+
+        canvas.bind('<Button-1>', _on_b1)
+        canvas.bind('<B1-Motion>', _on_b1_motion)
+        canvas.bind('<ButtonRelease-1>', _on_b1_up)
+        canvas.bind('<Button-3>', _on_b3)
+        canvas.bind('<B3-Motion>', _on_b3_motion)
+        canvas.bind('<ButtonRelease-3>', lambda e: _paint_mode.update({'value': None}))
+        canvas.bind('<Configure>', lambda e: rebuild_grid())
+
+        # playhead animation and UI highlight helpers
+        def animate_playhead(col_index, step_time_local):
+            try:
+                cell_w = canvas._cell_w
+                start_x = col_index * cell_w
+                end_x = (col_index + 1) * cell_w
+                steps = max(6, int(min(32, step_time_local * 1000 // 10)))
+                if steps <= 0:
+                    steps = 6
+                delay_ms = max(1, int(step_time_local * 1000 / steps))
+
+                def _step(i=0):
+                    try:
+                        frac = float(i) / float(steps)
+                        x = start_x + (end_x - start_x) * frac
+                        canvas.coords('playhead', x, 0, x, canvas._height)
+                    except Exception:
+                        pass
+                    if i < steps:
+                        canvas.after(delay_ms, lambda: _step(i+1))
+
+                _step(0)
+            except Exception:
+                pass
+
+        def _update_ui_for_column(col_index, tracks_snapshot, step_time_local):
+            try:
+                # revert previous highlights using stored ids (fast)
+                prev_ids = getattr(self, '_music_prev_note_ids', []) or []
+                for iid in prev_ids:
+                    try:
+                        canvas.itemconfigure(iid, fill=neon_fill, outline=neon_outline)
+                    except Exception:
+                        pass
+
+                # highlight current active cells for this column
+                new_ids = []
+                tmp_ids = []
+                note_map = getattr(canvas, '_note_map', {})
+                for ti, track in enumerate(tracks_snapshot):
+                    for r in range(rows):
+                        try:
+                            if r < len(track.get('grid', [])) and col_index < len(track.get('grid', [])[r]) and track['grid'][r][col_index]:
+                                key = (ti, r, col_index)
+                                iid = note_map.get(key)
+                                if iid:
+                                    try:
+                                        canvas.itemconfigure(iid, fill=neon_fill, outline='#ffffff')
+                                    except Exception:
+                                        pass
+                                    new_ids.append(iid)
+                                else:
+                                    # create a temporary highlight for cells that may not have a stored rectangle
+                                    x0 = col_index * canvas._cell_w + 1
+                                    y0 = (ti*rows + r) * canvas._cell_h + 1
+                                    x1 = x0 + canvas._cell_w - 2
+                                    y1 = y0 + canvas._cell_h - 2
+                                    try:
+                                        tid = canvas.create_rectangle(x0, y0, x1, y1, fill=neon_fill, outline='#ffffff')
+                                        tmp_ids.append(tid)
+                                        new_ids.append(tid)
+                                    except Exception:
+                                        pass
                         except Exception:
                             pass
 
-        def toggle_cell(ti, r, c):
-            track = self.music_tracks[ti]
-            track['grid'][r][c] = 1 - track['grid'][r][c]
-            refresh_buttons()
+                # store new highlighted ids for future revert
+                try:
+                    self._music_prev_note_ids = new_ids
+                except Exception:
+                    self._music_prev_note_ids = []
+
+                # schedule clearing of any temporary highlights
+                if tmp_ids:
+                    def _clear_tmp(ids=tmp_ids):
+                        for i in ids:
+                            try:
+                                canvas.delete(i)
+                            except Exception:
+                                pass
+                    try:
+                        canvas.after(int(step_time_local * 1000 * 0.85), _clear_tmp)
+                    except Exception:
+                        pass
+
+                # animate playhead and remember current column
+                try:
+                    animate_playhead(col_index, step_time_local)
+                except Exception:
+                    pass
+                self._music_prev_col = col_index
+            except Exception:
+                # fallback: try a conservative cleanup and still animate
+                try:
+                    def _clear_tmp_fallback():
+                        try:
+                            for iid in canvas.find_withtag('tmp_active'):
+                                canvas.delete(iid)
+                        except Exception:
+                            pass
+                    canvas.after(int(step_time_local * 1000 * 0.9), _clear_tmp_fallback)
+                    animate_playhead(col_index, step_time_local)
+                    self._music_prev_col = col_index
+                except Exception:
+                    pass
 
         rebuild_grid()
 
@@ -2293,7 +2623,19 @@ class ForzeOS:
         def on_select_track(evt):
             sel = track_listbox.curselection()
             if sel:
-                sel_track_var.set(sel[0])
+                idx = sel[0]
+                sel_track_var.set(idx)
+                # focus the canvas on the selected track
+                try:
+                    rebuild_grid()
+                    total_h = canvas._total_rows * canvas._cell_h if getattr(canvas, '_total_rows', None) is not None else 0
+                    if total_h > 0:
+                        y = (idx * rows) * canvas._cell_h
+                        center_y = y + (rows * canvas._cell_h) / 2
+                        top = max(0.0, min(1.0, (center_y - (canvas.winfo_height() / 2)) / float(total_h)))
+                        canvas.yview_moveto(top)
+                except Exception:
+                    pass
         track_listbox.bind('<<ListboxSelect>>', on_select_track)
 
         tk.Button(right, text='Copy Pattern', bg=self.colors['light'], command=lambda: copy_pattern()).pack(fill=tk.X, pady=2)
@@ -2335,6 +2677,12 @@ class ForzeOS:
                 rec_status.config(text=f'Rec: Stopped ({len(self.kb_recordings)} events)')
             tk.Button(rec_btn_frame, text='Start Rec', command=start_rec, bg='green', fg='white').pack(side=tk.LEFT, padx=4)
             tk.Button(rec_btn_frame, text='Stop Rec', command=stop_rec, bg='red', fg='white').pack(side=tk.LEFT, padx=4)
+
+            # allow key presses when keyboard window is focused
+            try:
+                win.bind('<Key>', on_key)
+            except Exception:
+                pass
 
             # Save/Load/Play recording
             def save_rec():
@@ -2451,14 +2799,15 @@ class ForzeOS:
         def change_grid_color():
             color = colorchooser.askcolor(title="Grid Rengini Seç")[1]
             if color:
-                # Grid frame arka planını değiştir
-                grid_canvas.config(bg=color)
-                # Bütün hücre (button) arka planlarını da değiştir
-                for tb in track_buttons:
-                    for row in tb:
-                        for btn in row:
-                            if btn.cget("bg") == self.colors['dark']:  # sadece boş hücreler
-                                btn.config(bg=color)
+                # update canvas background and redraw
+                try:
+                    canvas.config(bg=color)
+                except Exception:
+                    pass
+                try:
+                    rebuild_grid()
+                except Exception:
+                    pass
 
         # helpers for audio
         def make_sound_from_buffer(samples):
@@ -2537,157 +2886,182 @@ class ForzeOS:
 
             return np.int16(np.clip(wave * 32767, -32767, 32767))
 
-        # playback thread
+        # Master bus processing: soft-limiter + simple delay (block-based for realtime)
+        def _music_master_process_block(buf):
+            out = np.asarray(buf, dtype=np.float32)
+            try:
+                if not hasattr(self, '_music_delay_buf') or getattr(self, '_music_delay_len', 0) < 1:
+                    self._music_delay_len = max(1, int(sr * 5))
+                    self._music_delay_buf = np.zeros(self._music_delay_len, dtype=np.float32)
+                    self._music_delay_idx = 0
+            except Exception:
+                self._music_delay_len = int(sr * 5)
+                self._music_delay_buf = np.zeros(self._music_delay_len, dtype=np.float32)
+                self._music_delay_idx = 0
+
+            delay_time = 0.22
+            delay_feedback = 0.35
+            delay_mix = 0.22
+            delay_samples = int(sr * delay_time)
+            db = getattr(self, '_music_delay_buf', None)
+            idx = int(getattr(self, '_music_delay_idx', 0))
+            L = len(out)
+            if delay_samples > 0 and db is not None and len(db) > 0:
+                lock = getattr(self, '_music_delay_lock', None)
+                if lock:
+                    with lock:
+                        if idx + L <= len(db):
+                            delayed = db[idx:idx+L]
+                            out = out + delayed * delay_mix
+                            db[idx:idx+L] = db[idx:idx+L]*delay_feedback + out*delay_feedback
+                            idx = (idx + L) % len(db)
+                        else:
+                            part1 = len(db) - idx
+                            delayed = np.concatenate((db[idx:], db[:L-part1]))
+                            out = out + delayed * delay_mix
+                            db[idx:] = db[idx:]*delay_feedback + out[:part1]*delay_feedback
+                            db[:L-part1] = db[:L-part1]*delay_feedback + out[part1:]*delay_feedback
+                            idx = (idx + L) % len(db)
+                        self._music_delay_idx = idx
+                else:
+                    if idx + L <= len(db):
+                        delayed = db[idx:idx+L]
+                        out = out + delayed * delay_mix
+                        db[idx:idx+L] = db[idx:idx+L]*delay_feedback + out*delay_feedback
+                        idx = (idx + L) % len(db)
+                    else:
+                        part1 = len(db) - idx
+                        delayed = np.concatenate((db[idx:], db[:L-part1]))
+                        out = out + delayed * delay_mix
+                        db[idx:] = db[idx:]*delay_feedback + out[:part1]*delay_feedback
+                        db[:L-part1] = db[:L-part1]*delay_feedback + out[part1:]*delay_feedback
+                        idx = (idx + L) % len(db)
+                    self._music_delay_idx = idx
+
+            # soft limiter via tanh
+            y = np.tanh(out)
+            m = np.max(np.abs(y)) if np.any(y) else 0.0
+            if m > 0:
+                y = y / m * 0.95
+            return y
+
+        # Offline master processing used for exports (vectorized echo + limiter)
+        def _music_master_process_offline(mix):
+            out = np.asarray(mix, dtype=np.float32).copy()
+            delay_time = 0.22
+            delay_feedback = 0.35
+            delay_mix = 0.22
+            delay_samples = int(sr * delay_time)
+            if delay_samples > 0:
+                max_echoes = 6
+                for i in range(1, max_echoes):
+                    weight = (delay_feedback ** i)
+                    start = delay_samples * i
+                    if start >= len(out):
+                        break
+                    out[start:] += mix[:-start] * delay_mix * weight
+            # soft limiter
+            y = np.tanh(out)
+            m = np.max(np.abs(y)) if np.any(y) else 0.0
+            if m > 0:
+                y = y / m * 0.95
+            return y
+
+        # playback thread (improved scheduling to reduce jitter)
         def playback_thread():
             chan = pygame.mixer.Channel(1)
-            bpm = max(20, min(400, bpm_var.get()))
-            step_time = 60.0/bpm/4.0
             col = 0
+            next_time = time.perf_counter()
             while not self._music_stop:
-                loop = loop_var.get()
-                # Take a snapshot of tracks/grid sizes so concurrent UI actions
-                # (adding/removing tracks, rebuilding grid) won't cause index errors
-                tracks_snapshot = list(self.music_tracks)
-                num_tracks = len(tracks_snapshot)
-                current_rows = rows
-                current_cols = cols
+                try:
+                    bpm = max(20, min(400, bpm_var.get()))
+                    step_time = 60.0/bpm/4.0
+                    loop = loop_var.get()
 
-                # mix all tracks for this column (defensively check bounds)
-                buf = np.zeros(int(sr*step_time), dtype=np.float32)
-                for ti, track in enumerate(tracks_snapshot):
-                    instr = track.get('instr', 'sine')
-                    vol = track.get('vol', 0.9)
-                    # guard row/col accesses in case the grid shape changed
-                    for r in range(current_rows):
+                    # Take a snapshot of tracks/grid sizes so concurrent UI actions
+                    tracks_snapshot = list(self.music_tracks)
+                    num_tracks = len(tracks_snapshot)
+                    current_rows = rows
+                    current_cols = cols
+
+                    # mix all tracks for this column (defensively check bounds)
+                    buf = np.zeros(int(max(1, sr * step_time)), dtype=np.float32)
+                    for ti, track in enumerate(tracks_snapshot):
+                        instr = track.get('instr', 'sine')
+                        vol = track.get('vol', 0.9)
+                        for r in range(current_rows):
+                            try:
+                                if r < len(track.get('grid', [])) and current_cols > 0 and col < len(track['grid'][r]) and track['grid'][r][col]:
+                                    f = (261.63)*(2**(r/12.0))
+                                    n = synth_wave_mono(f, step_time, instr)
+                                    L = len(n)
+                                    buf[:L] += (n.astype(np.float32)/32767.0) * vol
+                            except Exception:
+                                continue
+
+                    # process audio through master bus (delay + soft limiter)
+                    if np.any(buf):
+                        processed = _music_master_process_block(buf)
+                        samples = np.int16(np.clip(processed*32767, -32767, 32767))
                         try:
-                            if r < len(track.get('grid', [])) and current_cols > 0 and col < len(track['grid'][r]) and track['grid'][r][col]:
-                                f = (261.63)*(2**(r/12.0))
-                                n = synth_wave_mono(f, step_time, instr)
-                                buf[:len(n)] += (n.astype(np.float32)/32767.0) * vol
+                            init = pygame.mixer.get_init()
+                            chans = init[2] if init and len(init) > 2 else 1
                         except Exception:
-                            # best-effort: skip malformed rows/cells
-                            continue
+                            chans = 1
+                        if chans <= 1:
+                            arr = samples
+                        else:
+                            arr = np.tile(samples.reshape(-1,1),(1,chans))
+                        try:
+                            s = make_sound_from_buffer(arr)
+                            chan.play(s)
+                        except Exception as e:
+                            print('Playback error', e)
+                        finally:
+                            try:
+                                del arr
+                            except Exception:
+                                pass
+                            try:
+                                del samples
+                            except Exception:
+                                pass
+                            try:
+                                del buf
+                            except Exception:
+                                pass
+                            try:
+                                del s
+                            except Exception:
+                                pass
 
-                # normalize
-                if np.any(buf):
-                    m = np.max(np.abs(buf))
-                    if m > 0:
-                        buf = buf / m * 0.9
-                    samples = np.int16(np.clip(buf*32767, -32767, 32767))
+                    # schedule UI update on main thread (playhead + highlights)
                     try:
-                        init = pygame.mixer.get_init()
-                        chans = init[2] if init and len(init) > 2 else 1
+                        parent = self.music_window if getattr(self, 'music_window', None) else self.root
+                        parent.after(0, lambda col=col, snap=tracks_snapshot, st=step_time: _update_ui_for_column(col, snap, st))
                     except Exception:
-                        chans = 1
-                    if chans <= 1:
-                        arr = samples
-                    else:
-                        arr = np.tile(samples.reshape(-1,1),(1,chans))
-                    try:
-                        s = make_sound_from_buffer(arr)
-                        chan.play(s)
-                    except Exception as e:
-                        print('Playback error', e)
-                    finally:
-                        # explicitly release large buffers to help GC
-                        try:
-                            del arr
-                        except Exception:
-                            pass
-                        try:
-                            del samples
-                        except Exception:
-                            pass
-                        try:
-                            del buf
-                        except Exception:
-                            pass
-                        try:
-                            del s
-                        except Exception:
-                            pass
+                        pass
 
-                # UI highlight: compute the on/off value now and pass it into the
-                # scheduled callback so the lambda does not re-index potentially
-                # mutated structures later (avoids IndexError).
-                for ti in range(num_tracks):
-                    for r in range(current_rows):
-                        try:
-                            # safe widget lookup
-                            try:
-                                widget = track_buttons[ti][r][col]
-                            except Exception:
-                                continue
+                    # precise wait until next step (minimize drift)
+                    next_time += step_time
+                    now = time.perf_counter()
+                    sleep_time = next_time - now
+                    if sleep_time > 0.005:
+                        time.sleep(max(0, sleep_time - 0.002))
+                    # final short wait (yield) to approach the target time
+                    while time.perf_counter() < next_time:
+                        time.sleep(0)
 
-                            # determine if the cell is active using the snapshot
-                            is_on = False
-                            try:
-                                if ti < num_tracks and r < len(tracks_snapshot[ti].get('grid', [])) and col < len(tracks_snapshot[ti]['grid'][r]):
-                                    is_on = bool(tracks_snapshot[ti]['grid'][r][col])
-                            except Exception:
-                                is_on = False
-
-                            # schedule UI update on main thread using the captured is_on
-                            try:
-                                if getattr(self, 'music_window', None) and getattr(self, 'music_window', 'w'):
-                                    self.music_window.after(0, lambda w=widget, on=is_on: w.config(bg='red' if on else '#555'))
-                                else:
-                                    self.root.after(0, lambda w=widget, on=is_on: w.config(bg='red' if on else '#555'))
-                            except Exception:
-                                # best-effort: log and continue
-                                logger.exception("Failed to schedule music UI highlight")
-                        except Exception:
-                            # avoid noisy stacktraces for transient UI races
-                            continue
-
-                time.sleep(step_time)
-
-                # reset colors: same defensive approach as highlighting above
-                for ti in range(num_tracks):
-                    for r in range(current_rows):
-                        try:
-                            try:
-                                widget = track_buttons[ti][r][col]
-                            except Exception:
-                                continue
-
-                            is_on = False
-                            try:
-                                if ti < num_tracks and r < len(tracks_snapshot[ti].get('grid', [])) and col < len(tracks_snapshot[ti]['grid'][r]):
-                                    is_on = bool(tracks_snapshot[ti]['grid'][r][col])
-                            except Exception:
-                                is_on = False
-
-                            try:
-                                # Schedule a safe config call that first verifies the widget still exists.
-                                def _schedule_safe_config(parent, w, on_flag):
-                                    def _inner():
-                                        try:
-                                            if getattr(w, 'winfo_exists', None) and w.winfo_exists():
-                                                w.config(bg='yellow' if on_flag else self.colors.get('dark', '#000000'))
-                                        except Exception:
-                                            # Widget may have been destroyed between scheduling and execution
-                                            return
-                                    try:
-                                        parent.after(0, _inner)
-                                    except Exception:
-                                        # Parent (window) might be destroyed; ignore
-                                        return
-
-                                parent = self.music_window if getattr(self, 'music_window', None) else self.root
-                                _schedule_safe_config(parent, widget, is_on)
-                            except Exception:
-                                logger.exception("Failed to schedule music UI reset")
-                        except Exception:
-                            # suppress transient UI race errors
-                            continue
-
-                col += 1
-                if col >= cols:
-                    if loop:
-                        col = 0
-                    else:
-                        break
+                    col += 1
+                    if col >= cols:
+                        if loop:
+                            col = 0
+                        else:
+                            break
+                except Exception:
+                    # avoid crashing the playback thread on transient errors
+                    logger.exception('Playback thread error')
+                    break
             self._music_stop = True
 
         def start_playback():
@@ -2798,10 +3172,8 @@ class ForzeOS:
                                     if base_idx + L > len(mix):
                                         mix = np.pad(mix, (0, base_idx + L - len(mix)))
                                     mix[base_idx:base_idx+L] += s * vol
-                    # normalize
-                    m = np.max(np.abs(mix))
-                    if m>0:
-                        mix = mix / m * 0.9
+                    # master bus offline processing (delay + limiter)
+                    mix = _music_master_process_offline(mix)
                     samples = np.int16(np.clip(mix*32767, -32767, 32767))
                     # write wav (mono)
                     with wave.open(path, 'wb') as wf:
@@ -3013,7 +3385,16 @@ class ForzeOS:
                 except Exception as e:
                     print('Key play error', e)
 
-        self.music_window.bind_all('<Key>', on_key)
+        # Only capture keys when Music Studio window is focused
+        try:
+            self.music_window.bind('<Key>', on_key)
+            self._music_global_keybound = False
+        except Exception:
+            try:
+                self.music_window.bind_all('<Key>', on_key)
+                self._music_global_keybound = True
+            except Exception:
+                self._music_global_keybound = False
 
         # initial selection
         if self.music_tracks:
@@ -3021,9 +3402,13 @@ class ForzeOS:
             sel_track_var.set(0)
 
         # expose helpers for unit tests or other code
+        try:
+            self.music_window.focus_set()
+        except Exception:
+            pass
         self.music_rebuild_grid = rebuild_grid
-        self.music_refresh_buttons = refresh_buttons
-
+        # legacy alias: refresh_buttons mapped to canvas rebuild
+        self.music_refresh_buttons = lambda: rebuild_grid()
 
     def open_video_player(self, filepath=None):
         """Gelişmiş VLC tabanlı video oynatıcı"""
