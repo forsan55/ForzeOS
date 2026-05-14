@@ -4978,15 +4978,20 @@ class ForzeOS:
         except Exception:
             pass
 
-    def _safe_spawn_process(self, cmd_list, cwd=None, run_type='normal', window=None, env=None, creationflags=0):
-        """Spawn a subprocess safely (non-shell). Returns popen or raises."""
+    def _safe_spawn_process(self, cmd_list, cwd=None, run_type='normal', window=None, env=None, creationflags=None):
+        """Spawn a subprocess safely (non-shell). Returns popen or raises.
+
+        On Windows the default behavior is to create a new console for GUI
+        applications; callers that want the child to inherit no-new-console
+        behavior should pass `creationflags=0`.
+        """
         try:
             if sys.platform.startswith('win'):
-                # Use CREATE_NEW_CONSOLE so GUI apps show on taskbar when appropriate
+                # Use CREATE_NEW_CONSOLE by default so GUI apps show on taskbar
                 CREATE_NEW_CONSOLE = 0x00000010
-                flags = creationflags or CREATE_NEW_CONSOLE
+                flags = CREATE_NEW_CONSOLE if creationflags is None else creationflags
             else:
-                flags = creationflags or 0
+                flags = 0 if creationflags is None else creationflags
 
             popen = subprocess.Popen(list(cmd_list), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      stdin=subprocess.PIPE, text=True, shell=False, cwd=cwd, env=env,
@@ -5204,7 +5209,117 @@ class ForzeOS:
         except Exception:
             return None
 
-        
+    def run_code_in_terminal(self, editor_window=None):
+        """Save current editor buffer to a temporary .py and run it in the Terminal.
+
+        This uses the internal `_safe_spawn_process` helper so the child process is
+        spawned independently (non-blocking) and stdout/stderr are streamed into
+        the terminal UI. If `_safe_spawn_process` fails, falls back to a simple
+        Popen + manual drain.
+        """
+        try:
+            import tempfile, sys, os, types, threading, subprocess
+
+            # Determine source editor window
+            win = editor_window or getattr(self, 'current_editor_window', None)
+            if not win:
+                try:
+                    for w in list(getattr(self, 'running_apps', {}).values()):
+                        if hasattr(w, 'title') and 'code editor' in str(w.title).lower():
+                            win = w
+                            break
+                except Exception:
+                    pass
+
+            # Find active text widget
+            textw = None
+            try:
+                cur_tab = getattr(win, 'current_tab', None)
+                if cur_tab and cur_tab in getattr(win, 'tabs', {}):
+                    textw = win.tabs[cur_tab].get('text')
+                else:
+                    for t in getattr(win, 'tabs', {}).values():
+                        tt = t.get('text')
+                        if isinstance(tt, tk.Text):
+                            textw = tt
+                            break
+            except Exception:
+                pass
+
+            code = textw.get('1.0', 'end-1c') if textw else ''
+
+            # Persist code to a temporary file (child process needs a real file)
+            fd, tmp_path = tempfile.mkstemp(suffix='.py', prefix='forze_run_', text=True)
+            os.close(fd)
+            with open(tmp_path, 'w', encoding='utf-8') as fh:
+                fh.write(code)
+
+            # Open the Terminal UI so the user sees output; ignore errors
+            try:
+                self.open_terminal()
+            except Exception:
+                pass
+
+            # Adapter object that supplies a .console for streaming output
+            Adapter = types.SimpleNamespace
+            term_adapter = Adapter()
+            term_adapter.console = getattr(self, 'terminal_output', None)
+            term_adapter._processes = {}
+            term_adapter._refresh_proc_list = lambda: None
+
+            # Echo the command to the terminal output
+            try:
+                if term_adapter.console:
+                    term_adapter.console.insert(tk.END, f"$ {sys.executable} {tmp_path}\n")
+                    term_adapter.console.see(tk.END)
+            except Exception:
+                pass
+
+            # Prefer registering the child with the embedded terminal window so
+            # I/O can be streamed and user input forwarded. Fall back to the
+            # adapter if the terminal window isn't available.
+            win_for_spawn = getattr(self, 'terminal_window', None) or term_adapter
+
+            try:
+                # Ask for no new console so child stdin/stdout are pipe-backed
+                popen = self._safe_spawn_process([sys.executable, tmp_path], run_type='normal', window=win_for_spawn, creationflags=0)
+                # remember last spawned process so execute_terminal_command can forward stdin
+                try:
+                    self._last_run_popen = popen
+                    self._last_run_tmpfile = tmp_path
+                except Exception:
+                    pass
+            except Exception:
+                # Last-resort: spawn with pipes and start threads to drain output
+                popen = subprocess.Popen([sys.executable, tmp_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE, text=True, shell=False)
+                try:
+                    self._last_run_popen = popen
+                    self._last_run_tmpfile = tmp_path
+                except Exception:
+                    pass
+
+                def _drain(stream, widget):
+                    try:
+                        for line in iter(stream.readline, ''):
+                            if not line:
+                                break
+                            try:
+                                if widget:
+                                    widget.insert(tk.END, line)
+                                    widget.see(tk.END)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                if getattr(self, 'terminal_output', None):
+                    threading.Thread(target=_drain, args=(popen.stdout, self.terminal_output), daemon=True).start()
+                    threading.Thread(target=_drain, args=(popen.stderr, self.terminal_output), daemon=True).start()
+
+            return tmp_path
+        except Exception:
+            return None
+
     def get_default_config(self):
         """Get default system configuration"""
         return {
@@ -17208,6 +17323,18 @@ class ForzeOS:
             scrollbar = tk.Scrollbar(output_frame, command=self.terminal_output.yview)
             scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
             self.terminal_output.config(yscrollcommand=scrollbar.set)
+
+            # Keep a reference to the terminal window and expose a minimal
+            # process registry so spawned processes can be registered and
+            # their output streamed into the same console widget.
+            try:
+                self.terminal_window = window
+                window.console = self.terminal_output
+                # minimal process bookkeeping expected by _safe_spawn_process
+                window._processes = {}
+                window._refresh_proc_list = lambda: None
+            except Exception:
+                pass
             
             # Command input
             input_frame = tk.Frame(window, bg='black')
@@ -17637,6 +17764,52 @@ class ForzeOS:
             command = self.terminal_input.get().strip()
             if not command:
                 return
+
+            # If there's an active spawned child process, forward the input
+            # to its stdin instead of interpreting it as a shell command.
+            try:
+                active = None
+                # Prefer explicit terminal window registry
+                tw = getattr(self, 'terminal_window', None)
+                if tw and hasattr(tw, '_processes') and tw._processes:
+                    # choose last running process
+                    for pid, info in reversed(list(tw._processes.items())):
+                        p = info.get('popen')
+                        if p and p.poll() is None:
+                            active = p
+                            break
+                # fallback to last_run_popen
+                if not active:
+                    lp = getattr(self, '_last_run_popen', None)
+                    if lp and getattr(lp, 'poll', lambda:1)() is None:
+                        active = lp
+                if active:
+                    try:
+                        # echo and forward
+                        try:
+                            self.terminal_output.insert(tk.END, f"$ {command}\n")
+                            self.terminal_output.see(tk.END)
+                        except Exception:
+                            pass
+                        try:
+                            active.stdin.write(command + "\n")
+                            active.stdin.flush()
+                        except Exception:
+                            try:
+                                # binary fallback
+                                active.stdin.buffer.write((command + "\n").encode())
+                                active.stdin.buffer.flush()
+                            except Exception:
+                                pass
+                        try:
+                            self.terminal_input.delete(0, tk.END)
+                        except Exception:
+                            pass
+                        return
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
             # Komutu terminale yaz
             self.terminal_output.insert(tk.END, f"$ {command}\n")
@@ -20080,6 +20253,11 @@ class ForzeOS:
             debug_btn = tk.Button(run_frame, text='Debug', bg=self.colors['accent'], fg='white', font=('Arial',9),
                                   command=lambda: self.editor_run_python(window, run_type='debug'))
             debug_btn.pack(side=tk.LEFT, padx=2)
+
+            # Terminal run: save current buffer to a temp .py and run in Terminal (non-blocking)
+            term_run_btn = tk.Button(run_frame, text='ForzeOS Terminal', bg=self.colors.get('success','#2d7a2d'), fg='white', font=('Arial',9),
+                                     command=lambda: self.run_code_in_terminal(window))
+            term_run_btn.pack(side=tk.LEFT, padx=2)
 
             stop_btn = tk.Button(run_frame, text='Stop', bg=self.colors['danger'], fg='white', font=('Arial',9),
                                  command=lambda: self._stop_process_from_window(window))
@@ -34246,4 +34424,5 @@ if __name__ == "__main__":
                 pass
         except Exception:
             pass
+
 
