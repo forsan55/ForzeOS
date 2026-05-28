@@ -122,6 +122,9 @@ git clone https://github.com/forsan55/ForzeOS.git
 # Install dependencies
 pip install -r requirements.txt
 
+# Change directory
+cd ForzeOS
+
 # Launch the OS
 python forze_launcher.py
 
