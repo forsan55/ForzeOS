@@ -65,5 +65,8 @@ ForzeOS utilizes compiled C++ for high-performance window management:
 ## 🤝 Contributing
 ForzeOS is an evolving project. Feel free to fork, report issues, or submit pull requests!
 
+### Loading screen 
+![ForzeOS loading screen](Screenshot 2025-11-19 002727.png)
+
 
 
