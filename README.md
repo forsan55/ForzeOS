@@ -2,7 +2,7 @@
 # 🚀 ForzeOS
 **A high-performance Linux-like desktop simulation environment built with Python 3.11 for Windows.**
 
-LOGIN - admin
+USERNAME - admin
 PASSWORD - Forze esp32
 
 > [!WARNING]
