@@ -1,4 +1,8 @@
 
+## DO NOT BELIEVE LINKS ABOUT DOWNLOAD FORZEOS. ONLY TRUE DOWNLOAD IS FROM THIS PAGE 
+
+
+
 # 🚀 ForzeOS
 **A high-performance Linux-like desktop simulation environment built with Python 3.11 for Windows.**
 
