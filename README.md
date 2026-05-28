@@ -117,13 +117,13 @@ ForzeOS is more than just a standard Python project; it is a modular architectur
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/ForzeOS.git
+git clone https://github.com/forsan55/ForzeOS.git
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Launch the OS
-python main.py
+python forze_launcher.py
 
 ```
 
