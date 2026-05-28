@@ -62,15 +62,4 @@ ForzeOS utilizes compiled C++ for high-performance window management:
 ForzeOS is an evolving project. Feel free to fork, report issues, or submit pull requests!
 ```
 
----
 
-### Why this is better:
-* **Visual Hierarchy:** Uses headers and bullet points so people can scan it in 5 seconds.
-* **Code Blocks:** Makes it easy to copy-paste the installation commands.
-* **Clarity:** Specifically mentions the **C++ integration** which makes your project look much more advanced to other developers.
-
-
-
-**One last tip:** Since you have that **C++** file (`forze_agressive_focus.cpp`), you might want to tell people if they need a specific compiler (like MinGW or MSVC) to run it, or if you've already included a compiled `.dll`. 
-
-Would you like me to help you write a `requirements.txt` file based on the libraries you're using?
