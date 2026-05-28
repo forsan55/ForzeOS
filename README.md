@@ -3,6 +3,7 @@
 **A high-performance Linux-like desktop simulation environment built with Python 3.11 for Windows.**
 
 USERNAME - admin
+
 PASSWORD - Forze esp32
 
 > [!WARNING]
