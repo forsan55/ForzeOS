@@ -68,8 +68,6 @@ ForzeOS is an evolving project. Feel free to fork, report issues, or submit pull
 ### Loading screen 
 ![ForzeOS loading screen](loading.png)
 
-GitHub için daha etkili ve "teknik" bir İngilizce README metni arıyorsan, işte profesyonel bir taslak:
-
 ---
 
 # ForzeOS 💻
