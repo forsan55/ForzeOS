@@ -1,8 +1,13 @@
 
+## DO NOT BELIEVE LINKS ABOUT DOWNLOAD FORZEOS. ONLY TRUE DOWNLOAD IS FROM THIS PAGE 
+
+
+
 # 🚀 ForzeOS
 **A high-performance Linux-like desktop simulation environment built with Python 3.11 for Windows.**
 
-LOGIN - admin
+USERNAME - admin
+
 PASSWORD - Forze esp32
 
 > [!WARNING]
@@ -59,17 +64,96 @@ ForzeOS utilizes compiled C++ for high-performance window management:
 
 ## 🤝 Contributing
 ForzeOS is an evolving project. Feel free to fork, report issues, or submit pull requests!
-```
+
+### Loading screen 
+![ForzeOS loading screen](loading.png)
 
 ---
 
-### Why this is better:
-* **Visual Hierarchy:** Uses headers and bullet points so people can scan it in 5 seconds.
-* **Code Blocks:** Makes it easy to copy-paste the installation commands.
-* **Clarity:** Specifically mentions the **C++ integration** which makes your project look much more advanced to other developers.
+# ForzeOS 💻
+
+**ForzeOS** is a comprehensive operating system simulation developed with Python and Tkinter, featuring a modular desktop environment, an integrated AI assistant, and a wide array of built-in applications.
+
+---
+
+## 🚀 About the Project
+
+ForzeOS is more than just a standard Python project; it is a modular architecture designed to optimize system resources. By leveraging C++ DLLs for Windows system management and boasting over 100,000 lines of code, it provides a sophisticated desktop experience.
+
+## 🛠 Key Features
+
+* **Custom Desktop Environment:** Features a functional taskbar, icon management, and a custom window manager.
+
+
+* **C++ DLL Optimization:** Uses custom C++ DLLs to manage system resources and enhance performance.
+
+
+* **Integrated AI Assistant:** Includes an offline AI assistant with persistent memory, capable of handling commands and interactions.
+
+
+* **Rich Application Ecosystem:** Comes pre-loaded with a web browser, PDF reader, video player, AES-encrypted password manager, and more.
+
+
+* **Gaming Suite:** Includes interactive games such as Chess (with AI), Snake, Flappy Bird, and Tic-Tac-Toe.
+
+
+* **Focus Modes:** Features an advanced "Focus Mode" designed for aggressive performance optimization.
 
 
 
-**One last tip:** Since you have that **C++** file (`forze_agressive_focus.cpp`), you might want to tell people if they need a specific compiler (like MinGW or MSVC) to run it, or if you've already included a compiled `.dll`. 
+## 📐 Technical Architecture
 
-Would you like me to help you write a `requirements.txt` file based on the libraries you're using?
+| Component | Technology |
+| --- | --- |
+| **GUI** | Tkinter |
+| **Backend** | Python 3.x |
+| **System Hooks** | C++ DLLs |
+| **AI Engine** | N-gram Vectorization |
+| **Mobile Port** | Termux + XFCE + VNC |
+
+## 💡 Git clone and use 
+
+```bash
+# Clone the repository
+git clone https://github.com/forsan55/ForzeOS.git
+
+# Change directory
+cd ForzeOS
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Launch the OS
+python forze_launcher.py
+
+```
+
+## 🏗 Development Notes
+
+* **Modular Design:** The system employs a "lazy loading" mechanism, ensuring that heavy libraries are only loaded into RAM when strictly necessary.
+
+
+* **Performance:** Optimized for efficient task handling and system resource management.
+
+
+
+## 👥 Credits
+
+* **Code:** Forze
+
+
+* **Design:** Felina
+
+
+* **Innovation:** RRaings
+
+
+
+---
+
+*ForzeOS is developed for educational and personal use. Development is currently ongoing.*
+
+---
+
+
+
