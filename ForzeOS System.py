@@ -12419,46 +12419,135 @@ class ForzeOS:
 
     def show_file_context_menu(self, event):
         """Show context menu for files"""
-        selection = self.file_list.selection()
-        if not selection:
+        # Supports being called either from a Treeview selection or with an
+        # explicit `path_override` (used by the icons view bindings).
+        try:
+            # Allow an optional path override passed via attribute on the event
+            path_override = getattr(event, 'path_override', None) if event is not None else None
+        except Exception:
+            path_override = None
+
+        path = None
+        try:
+            if path_override:
+                path = path_override
+            else:
+                selection = None
+                try:
+                    selection = self.file_list.selection()
+                except Exception:
+                    selection = ()
+                if not selection:
+                    return
+                iid = selection[0]
+                item = self.file_list.item(iid)
+                name = None
+                try:
+                    name = item.get('values', [None])[0]
+                except Exception:
+                    name = None
+                # Use stored full-path mapping when available (search results may come from other folders)
+                try:
+                    path = (getattr(self, '_item_paths', {}) or {}).get(iid)
+                except Exception:
+                    path = None
+                if not path and name:
+                    path = os.path.join(self.current_dir, name)
+        except Exception:
+            path = None
+
+        if not path:
             return
-        
+
         menu = tk.Menu(None, tearoff=0)
-        
-        item = self.file_list.item(selection[0])
-        name = item['values'][0]
-        path = os.path.join(self.current_dir, name)
-        
-        # Basic operations
-        menu.add_command(label="Open", command=lambda: self.open_selected_item())
-        
-        # Open With submenu
-        if not os.path.isdir(path):
-            open_with = tk.Menu(menu, tearoff=0)
-            menu.add_cascade(label="Open With", menu=open_with)
-            
-            apps = [
-                ("Notepad", self.open_notepad),
-                ("Code Editor", self.open_code_editor),
-                ("PDF Reader", self.open_pdf_reader),
-                ("Gallery", self.open_gallery),
-                ("Music Player", self.open_music_player),
-                ("Video Player", self.open_video_player)
-            ]
-            
-            for app_name, method in apps:
-                open_with.add_command(label=app_name, 
-                    command=lambda m=method: m(path))
-        
+
+        def _do_open(p=path):
+            try:
+                if os.path.isdir(p):
+                    # Navigate into folder
+                    self.current_dir = p
+                    try:
+                        if hasattr(self, 'path_var'):
+                            self.path_var.set(self.current_dir)
+                    except Exception:
+                        pass
+                    self.load_directory()
+                else:
+                    try:
+                        self.safe_open_file(p)
+                    except Exception:
+                        self.open_file(p)
+            except Exception:
+                pass
+
+        menu.add_command(label="Open", command=_do_open)
+
+        # Open With submenu (files only)
+        try:
+            if os.path.isfile(path):
+                open_with = tk.Menu(menu, tearoff=0)
+                menu.add_cascade(label="Open With", menu=open_with)
+                apps = [
+                    ("Notepad", self.open_notepad),
+                    ("Code Editor", self.open_code_editor),
+                    ("PDF Reader", self.open_pdf_reader),
+                    ("Gallery", self.open_gallery),
+                    ("Music Player", self.open_music_player),
+                    ("Video Player", self.open_video_player)
+                ]
+                for app_name, method in apps:
+                    open_with.add_command(label=app_name, command=lambda m=method, p=path: m(p))
+        except Exception:
+            pass
+
         menu.add_separator()
-        menu.add_command(label="Properties", 
-            command=lambda: self.show_file_properties(path))
+        menu.add_command(label="Copy Path", command=lambda p=path: self._copy_to_clipboard(p))
+        menu.add_command(label="Properties", command=lambda p=path: self.show_file_properties(p))
         menu.add_separator()
-        menu.add_command(label="Delete", 
-            command=lambda: self.delete_file(path))
-        
-        menu.tk_popup(event.x_root, event.y_root)
-        menu.grab_release()
+        menu.add_command(label="Delete", command=lambda p=path: self.delete_file(p))
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        except Exception:
+            try:
+                menu.post(event.x_root, event.y_root)
+            except Exception:
+                pass
+        try:
+            menu.grab_release()
+        except Exception:
+            pass
+
+    def _copy_to_clipboard(self, path):
+        """Copy `path` to the system clipboard (cross-platform)."""
+        try:
+            if not path:
+                return
+            # Ensure GUI clipboard available
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(path)
+                try:
+                    messagebox.showinfo("Copied", "Path copied to clipboard")
+                except Exception:
+                    pass
+                return True
+            except Exception:
+                # Last-resort: write to os-specific clipboard helpers
+                if sys.platform.startswith('win'):
+                    try:
+                        import subprocess
+                        p = subprocess.Popen(['clip'], stdin=subprocess.PIPE, shell=False)
+                        p.communicate(input=path.encode('utf-8'))
+                        return True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            messagebox.showerror("Error", "Failed to copy path to clipboard")
+        except Exception:
+            pass
 
     def get_file_type(self, ext):
         """Return a human readable file type for properties dialog."""
@@ -14769,93 +14858,124 @@ class ForzeOS:
             
             # Path entry
             self.path_var = tk.StringVar(value=self.current_dir)
-            path_entry = tk.Entry(toolbar, textvariable=self.path_var, 
+            path_entry = tk.Entry(toolbar, textvariable=self.path_var,
                                 bg=self.colors['light'], fg=self.colors['fg'],
                                 font=('Arial', 10))
             path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
             path_entry.bind('<Return>', lambda e: self.navigate_to(self.path_var.get()))
 
+            # Search (incremental, background)
+            self.search_var = tk.StringVar(value='')
+            search_frame = tk.Frame(toolbar, bg=self.colors['dark'])
+            search_frame.pack(side=tk.RIGHT, padx=(6,0))
+            search_entry = tk.Entry(search_frame, textvariable=self.search_var, width=28,
+                                    bg=self.colors['light'], fg=self.colors['fg'], font=('Arial', 10))
+            search_entry.pack(side=tk.LEFT)
+            # Quick cancel and scope toggle (All drives)
+            self.search_scope = tk.BooleanVar(value=False)
+            tk.Checkbutton(search_frame, text='All', variable=self.search_scope, bg=self.colors['dark'],
+                           fg=self.colors['fg'], selectcolor=self.colors['dark']).pack(side=tk.LEFT, padx=4)
+            tk.Button(search_frame, text='✖', command=lambda: self._clear_search(), bg=self.colors['dark'], fg=self.colors['fg']).pack(side=tk.LEFT, padx=4)
+            self.search_status = tk.Label(search_frame, text='', bg=self.colors['dark'], fg=self.colors['fg'])
+            self.search_status.pack(side=tk.LEFT, padx=(6,0))
+            search_entry.bind('<KeyRelease>', lambda e: self._on_search_key(e))
+
             # View mode toggle
             view_frame = tk.Frame(toolbar, bg=self.colors['dark'])
             view_frame.pack(side=tk.RIGHT)
-            
             tk.Radiobutton(view_frame, text="📋 List", variable=self.view_mode, value="list",
                           command=self.load_directory, bg=self.colors['dark'],
                           fg=self.colors['fg']).pack(side=tk.LEFT, padx=2)
             tk.Radiobutton(view_frame, text="🖼️ Icons", variable=self.view_mode, value="icons",
                           command=self.load_directory, bg=self.colors['dark'],
                           fg=self.colors['fg']).pack(side=tk.LEFT, padx=2)
-            
+
             # Action buttons
             action_frame = tk.Frame(toolbar, bg=self.colors['dark'])
             action_frame.pack(side=tk.RIGHT, padx=5)
-            
             tk.Button(action_frame, text="📁 New Folder", command=self.create_new_folder,
                      bg=self.colors['warning'], fg='white').pack(side=tk.LEFT, padx=2)
-            
+
             # Path label
-            self.path_label = tk.Label(window, text=self.current_dir, bg=self.colors['bg'], 
+            self.path_label = tk.Label(window, text=self.current_dir, bg=self.colors['bg'],
                                       fg=self.colors['fg'], font=('Arial', 12))
             self.path_label.pack(fill=tk.X, padx=5, pady=2)
-            
-            # File list
+
+            # File list container
             list_frame = tk.Frame(window, bg=self.colors['bg'])
             list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-            
-            # List view with columns
+
+            # --- List view (Treeview) ---
+            self.list_view_frame = tk.Frame(list_frame, bg=self.colors['bg'])
+            self.list_view_frame.pack(fill=tk.BOTH, expand=True)
+
             columns = ("Name", "Type", "Size", "Modified")
-            self.file_list = ttk.Treeview(list_frame, columns=columns, show='headings',
+            self.file_list = ttk.Treeview(self.list_view_frame, columns=columns, show='headings',
                                         selectmode='extended')
-            
             # Configure columns
             self.file_list.heading("Name", text="Name", anchor="w")
             self.file_list.heading("Type", text="Type", anchor="w")
             self.file_list.heading("Size", text="Size", anchor="e")
             self.file_list.heading("Modified", text="Modified", anchor="w")
-            
             self.file_list.column("Name", width=300, anchor="w")
             self.file_list.column("Type", width=100, anchor="w")
             self.file_list.column("Size", width=100, anchor="e")
             self.file_list.column("Modified", width=150, anchor="w")
-            
-            # Scrollbars
-            yscroll = ttk.Scrollbar(list_frame, orient="vertical", 
-                                  command=self.file_list.yview)
-            xscroll = ttk.Scrollbar(list_frame, orient="horizontal", 
-                                  command=self.file_list.xview)
-            
-            self.file_list.configure(yscrollcommand=yscroll.set,
-                                   xscrollcommand=xscroll.set)
-            
-            # Pack everything
+
+            # Scrollbars for list view
+            yscroll = ttk.Scrollbar(self.list_view_frame, orient="vertical", command=self.file_list.yview)
+            xscroll = ttk.Scrollbar(self.list_view_frame, orient="horizontal", command=self.file_list.xview)
+            self.file_list.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
             self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             yscroll.pack(side=tk.RIGHT, fill=tk.Y)
             xscroll.pack(side=tk.BOTTOM, fill=tk.X)
-            
-            # Bind events
+
+            # --- Icons view (Canvas) ---
+            self.icons_frame = tk.Frame(list_frame, bg=self.colors['bg'])
+            self.icons_canvas = tk.Canvas(self.icons_frame, bg=self.colors['bg'], highlightthickness=0)
+            self.icons_scroll_y = ttk.Scrollbar(self.icons_frame, orient='vertical', command=self.icons_canvas.yview)
+            self.icons_canvas.configure(yscrollcommand=self.icons_scroll_y.set)
+            self.icons_inner_frame = tk.Frame(self.icons_canvas, bg=self.colors['bg'])
+            self.icons_window = self.icons_canvas.create_window((0,0), window=self.icons_inner_frame, anchor='nw')
+            def _on_icons_config(ev, canvas=self.icons_canvas, window=self.icons_window):
+                try:
+                    canvas.configure(scrollregion=canvas.bbox('all'))
+                except Exception:
+                    pass
+            self.icons_inner_frame.bind('<Configure>', _on_icons_config)
+            self.icons_canvas.bind('<Configure>', lambda e, w=self.icons_window: self.icons_canvas.itemconfig(w, width=e.width))
+
+            # Show appropriate view
+            try:
+                if self.view_mode.get() == 'icons':
+                    self.list_view_frame.pack_forget()
+                    self.icons_frame.pack(fill=tk.BOTH, expand=True)
+                    self.icons_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+                    self.icons_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+                else:
+                    try:
+                        self.icons_frame.pack_forget()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Bind events for list view
             self.file_list.bind('<Double-Button-1>', self.open_selected_item)
             self.file_list.bind('<Button-3>', self.show_file_context_menu)
-            
-            # Initialize drag and drop state
-            self.drag_data = {
-                "item": None,
-                "source": None,
-                "start_x": 0,
-                "start_y": 0,
-                "dragging": False,
-                "indicator": None
-            }
-            
-            # Add drag and drop bindings
             self.file_list.bind('<Button-1>', self.start_dragbutton)
             self.file_list.bind('<B1-Motion>', self.update_drag_indicator)
             self.file_list.bind('<ButtonRelease-1>', self.end_drag)
             self.file_list.bind('<Escape>', lambda e: self.cancel_drag())
-                        
-            # Store drag data
+
+            # Mapping of Treeview iid -> full path (used for search results & icons)
+            self._item_paths = {}
+
+            # Clear any previous drag state placeholders
             self.drag_data = None
             self.drag_icon = None
-            
+
+            # Initial directory load
             self.load_directory()
             
         except Exception as e:
@@ -16771,23 +16891,43 @@ class ForzeOS:
     def load_directory(self):
         """Load directory contents"""
         try:
-            # Use Treeview (self.file_list) populated in open_file_manager
-            # Clear existing items
+            # Clear existing items in list view
             if hasattr(self, 'file_list'):
-                for iid in self.file_list.get_children():
-                    self.file_list.delete(iid)
+                try:
+                    for iid in list(self.file_list.get_children()):
+                        try:
+                            if hasattr(self, '_item_paths') and iid in self._item_paths:
+                                del self._item_paths[iid]
+                        except Exception:
+                            pass
+                        try:
+                            self.file_list.delete(iid)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             else:
-                # Fallback: nothing to do
                 return
 
-            # Normalize current_dir (expand user and make absolute) before listing
+            # Clear icons view container if present
+            try:
+                if hasattr(self, 'icons_inner_frame'):
+                    for ch in list(self.icons_inner_frame.winfo_children()):
+                        try:
+                            ch.destroy()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Normalize current_dir
             try:
                 self.current_dir = os.path.expanduser(self.current_dir)
                 self.current_dir = os.path.abspath(self.current_dir)
             except Exception:
                 pass
 
-            # Update path label and path var if present
+            # Update path label and path var
             try:
                 self.path_label.config(text=self.current_dir)
             except Exception:
@@ -16798,6 +16938,29 @@ class ForzeOS:
             except Exception:
                 pass
 
+            # Ensure mapping exists
+            try:
+                if not hasattr(self, '_item_paths'):
+                    self._item_paths = {}
+            except Exception:
+                self._item_paths = {}
+
+            # If an active search query exists, start the incremental search
+            try:
+                if getattr(self, 'search_var', None) and self.search_var.get().strip():
+                    q = self.search_var.get().strip()
+                    try:
+                        if getattr(self, '_search_cancel_event', None):
+                            self._search_cancel_event.set()
+                    except Exception:
+                        pass
+                    self._search_cancel_event = threading.Event()
+                    t = threading.Thread(target=self._search_worker, args=(q, self._search_cancel_event, bool(self.search_scope.get())), daemon=True)
+                    t.start()
+                    return
+            except Exception:
+                pass
+
             if os.path.exists(self.current_dir) and os.path.isdir(self.current_dir):
                 try:
                     items = os.listdir(self.current_dir)
@@ -16805,6 +16968,78 @@ class ForzeOS:
                     items = []
                 items.sort()
 
+                # Icons view
+                try:
+                    if getattr(self, 'view_mode', None) and self.view_mode.get() == 'icons':
+                        for item in items:
+                            item_path = os.path.join(self.current_dir, item)
+                            try:
+                                is_dir = os.path.isdir(item_path)
+                            except Exception:
+                                is_dir = False
+                            typ = 'Folder' if is_dir else 'File'
+                            try:
+                                size = '' if is_dir else str(os.path.getsize(item_path))
+                            except Exception:
+                                size = ''
+                            try:
+                                modified = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(item_path)))
+                            except Exception:
+                                modified = ''
+
+                            # Create a compact icon card
+                            try:
+                                card = tk.Frame(self.icons_inner_frame, width=120, height=110, bg=self.colors['bg'])
+                                card.pack_propagate(False)
+                                card.pack(side=tk.LEFT, padx=8, pady=8)
+                                icon_text = '📁' if is_dir else '📄'
+                                lbl_icon = tk.Label(card, text=icon_text, font=('Segoe UI', 28), bg=self.colors['bg'], fg=self.colors['fg'])
+                                lbl_icon.pack()
+                                lbl_name = tk.Label(card, text=item, bg=self.colors['bg'], fg=self.colors['fg'], wraplength=120)
+                                lbl_name.pack()
+
+                                # Bind open and context menu
+                                def _on_open(e, p=item_path):
+                                    try:
+                                        if os.path.isdir(p):
+                                            self.current_dir = p
+                                            try:
+                                                if hasattr(self, 'path_var'):
+                                                    self.path_var.set(self.current_dir)
+                                            except Exception:
+                                                pass
+                                            self.load_directory()
+                                        else:
+                                            try:
+                                                self.safe_open_file(p)
+                                            except Exception:
+                                                self.open_file(p)
+                                    except Exception:
+                                        pass
+
+                                def _on_ctx(e, p=item_path):
+                                    try:
+                                        setattr(e, 'path_override', p)
+                                    except Exception:
+                                        pass
+                                    self.show_file_context_menu(e)
+
+                                lbl_icon.bind('<Double-Button-1>', _on_open)
+                                lbl_name.bind('<Double-Button-1>', _on_open)
+                                lbl_icon.bind('<Button-3>', _on_ctx)
+                                lbl_name.bind('<Button-3>', _on_ctx)
+                            except Exception:
+                                pass
+
+                        try:
+                            self.icons_canvas.configure(scrollregion=self.icons_canvas.bbox('all'))
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    pass
+
+                # Default: populate list/tree view
                 for item in items:
                     item_path = os.path.join(self.current_dir, item)
                     if os.path.isdir(item_path):
@@ -16820,10 +17055,293 @@ class ForzeOS:
                         modified = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(item_path)))
                     except Exception:
                         modified = ''
-                    # Insert into Treeview; first column is Name
-                    self.file_list.insert('', 'end', values=(item, type_, size, modified))
+                    try:
+                        iid = self.file_list.insert('', 'end', values=(item, type_, size, modified))
+                        try:
+                            self._item_paths[iid] = item_path
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"Load directory error: {e}")
+
+    def _on_search_key(self, event=None):
+        """Called on key release in search entry: debounce and start background search."""
+        try:
+            q = self.search_var.get().strip()
+        except Exception:
+            q = ''
+        # Cancel previous search
+        try:
+            if getattr(self, '_search_cancel_event', None):
+                self._search_cancel_event.set()
+        except Exception:
+            pass
+        # If empty, clear and reload
+        if not q:
+            try:
+                self.search_status.config(text='')
+            except Exception:
+                pass
+            try:
+                self.load_directory()
+            except Exception:
+                pass
+            return
+
+        # Start new search thread
+        try:
+            self._search_cancel_event = threading.Event()
+            t = threading.Thread(target=self._search_worker, args=(q, self._search_cancel_event, bool(self.search_scope.get())), daemon=True)
+            t.start()
+            try:
+                self.search_status.config(text='Searching...')
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _clear_search(self):
+        try:
+            try:
+                self.search_var.set('')
+            except Exception:
+                pass
+            try:
+                if getattr(self, '_search_cancel_event', None):
+                    self._search_cancel_event.set()
+            except Exception:
+                pass
+            try:
+                self.search_status.config(text='')
+            except Exception:
+                pass
+            try:
+                self.load_directory()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _search_worker(self, query, cancel_event, all_drives=False):
+        """Background worker: prioritized, scandir-based crawler that finds
+        matching filenames (including .exe) and posts batches to the UI.
+
+        Behavior improvements:
+        - Prioritizes common program/game folders so executables (eg. chrome.exe)
+          are found quickly without scanning the entire drive first.
+        - Uses os.scandir with a deque for iterative traversal (safer/faster).
+        - Batches UI updates to reduce Tk load.
+        - Respects `cancel_event`.
+        """
+        try:
+            q = (query or '').lower()
+        except Exception:
+            q = query or ''
+
+        # Prepare start points
+        starts = []
+        try:
+            if all_drives:
+                if sys.platform.startswith('win'):
+                    for d in range(65, 91):
+                        drive = f"{chr(d)}:\\"
+                        if os.path.exists(drive):
+                            starts.append(drive)
+                else:
+                    starts.append('/')
+            else:
+                # Always include current dir first
+                starts.append(self.current_dir)
+
+                # If user query is reasonably long, also prioritize common program/game folders
+                try:
+                    if len(q) >= 2:
+                        pri = []
+                        if sys.platform.startswith('win'):
+                            pf = os.environ.get('PROGRAMFILES')
+                            pfx86 = os.environ.get('PROGRAMFILES(X86)')
+                            prog_w6432 = os.environ.get('ProgramW6432')
+                            programdata = os.environ.get('PROGRAMDATA')
+                            local_app = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs')
+                            user_profile = os.environ.get('USERPROFILE')
+                            steam_common = None
+                            try:
+                                base = pfx86 or pf or 'C:\\Program Files (x86)'
+                                steam_common = os.path.join(base, 'Steam', 'steamapps', 'common')
+                            except Exception:
+                                steam_common = None
+                            game_paths = [os.path.join(user_profile or '', 'Games'), 'C:\\Games', 'D:\\Games']
+                            candidates = [pf, pfx86, prog_w6432, programdata, local_app, steam_common] + game_paths
+                            for p in candidates:
+                                try:
+                                    if p and os.path.exists(p) and p not in starts and p not in pri:
+                                        pri.append(p)
+                                except Exception:
+                                    continue
+                        else:
+                            # Unix-like prioritized locations
+                            cand = ['/usr/bin', '/usr/local/bin', '/opt', os.path.expanduser('~')]
+                            for p in cand:
+                                if p and os.path.exists(p) and p not in starts:
+                                    pri.append(p)
+
+                        # Prepend prioritized paths so they are searched first
+                        for p in reversed(pri):
+                            starts.insert(0, p)
+                except Exception:
+                    pass
+        except Exception:
+            starts = [self.current_dir]
+
+        # Clear current UI first (safe from background thread via after)
+        try:
+            def _clear_ui():
+                try:
+                    for iid in list(self.file_list.get_children()):
+                        try:
+                            self.file_list.delete(iid)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'icons_inner_frame'):
+                        for ch in list(self.icons_inner_frame.winfo_children()):
+                            try:
+                                ch.destroy()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    self._item_paths = {}
+                except Exception:
+                    self._item_paths = {}
+            try:
+                self.root.after(0, _clear_ui)
+            except Exception:
+                _clear_ui()
+        except Exception:
+            pass
+
+        from collections import deque
+        results = 0
+        max_results = 10000
+        batch = []
+        batch_size = 40
+
+        def _post_batch(b):
+            if not b:
+                return
+            def _insert():
+                try:
+                    for (n, t, s, m, p) in b:
+                        try:
+                            iid = self.file_list.insert('', 'end', values=(n, t, s, m))
+                            try:
+                                self._item_paths[iid] = p
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            try:
+                self.root.after(0, _insert)
+            except Exception:
+                _insert()
+
+        visited = set()
+        try:
+            for start in starts:
+                if cancel_event.is_set() or results >= max_results:
+                    break
+                dq = deque()
+                try:
+                    dq.append(start)
+                except Exception:
+                    continue
+
+                while dq and not cancel_event.is_set() and results < max_results:
+                    cur = dq.popleft()
+                    try:
+                        real = os.path.realpath(cur)
+                    except Exception:
+                        real = cur
+                    if real in visited:
+                        continue
+                    visited.add(real)
+                    try:
+                        with os.scandir(cur) as it:
+                            for entry in it:
+                                if cancel_event.is_set() or results >= max_results:
+                                    break
+                                try:
+                                    name = entry.name
+                                    lname = name.lower()
+                                    # If query empty, skip (shouldn't happen)
+                                    if not q:
+                                        match = False
+                                    else:
+                                        match = (q in lname)
+
+                                    if match:
+                                        try:
+                                            p = entry.path
+                                        except Exception:
+                                            p = os.path.join(cur, name)
+                                        is_dir = False
+                                        try:
+                                            is_dir = entry.is_dir(follow_symlinks=False)
+                                        except Exception:
+                                            try:
+                                                is_dir = os.path.isdir(p)
+                                            except Exception:
+                                                is_dir = False
+                                        typ = 'Folder' if is_dir else 'File'
+                                        s = ''
+                                        m = ''
+                                        try:
+                                            st = entry.stat(follow_symlinks=False)
+                                            if not is_dir:
+                                                s = str(getattr(st, 'st_size', ''))
+                                            m = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(getattr(st, 'st_mtime', 0)))
+                                        except Exception:
+                                            pass
+                                        batch.append((name, typ, s, m, p))
+                                        results += 1
+                                        if len(batch) >= batch_size:
+                                            _post_batch(batch[:])
+                                            batch[:] = []
+
+                                    # If entry is a directory, schedule it for traversal
+                                    try:
+                                        if entry.is_dir(follow_symlinks=False):
+                                            # Skip some large folders by heuristic to keep UI responsive
+                                            lowerp = name.lower()
+                                            if lowerp in ('.git', 'node_modules', '__pycache__'):
+                                                continue
+                                            dq.append(entry.path)
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    continue
+                    except Exception:
+                        # skip directories we cannot access
+                        continue
+
+            # flush remaining batch
+            if batch:
+                _post_batch(batch[:])
+        except Exception:
+            pass
+
+        try:
+            self.root.after(0, lambda: self.search_status.config(text=f"{results} results" if results else "No results"))
+        except Exception:
+            pass
 
     
     def go_back(self):
@@ -16851,18 +17369,52 @@ class ForzeOS:
         try:
             # Treeview selection
             if hasattr(self, 'file_list'):
-                sel = self.file_list.selection()
-                if not sel:
-                    return
-                item = self.file_list.item(sel[0])
-                item_name = item.get('values', [None])[0]
-                if not item_name:
-                    return
-                item_path = os.path.join(self.current_dir, item_name)
+                iid = None
+                # If event provides the click location, prefer the clicked row
+                try:
+                    if event is not None and hasattr(event, 'y'):
+                        try:
+                            iid = self.file_list.identify_row(event.y)
+                        except Exception:
+                            iid = None
+                except Exception:
+                    iid = None
+                # Fall back to selection
+                if not iid:
+                    sel = self.file_list.selection()
+                    if not sel:
+                        return
+                    iid = sel[0]
+                # Prefer full path mapping if this item came from search results
+                item_path = None
+                try:
+                    item_path = (getattr(self, '_item_paths', {}) or {}).get(iid)
+                except Exception:
+                    item_path = None
+                if not item_path:
+                    item = self.file_list.item(iid)
+                    item_name = item.get('values', [None])[0]
+                    if not item_name:
+                        return
+                    item_path = os.path.join(self.current_dir, item_name)
                 # normalize
                 item_path = os.path.expanduser(item_path)
                 item_path = os.path.abspath(item_path)
                 if os.path.isdir(item_path):
+                    # Clear any active search so load_directory shows the folder contents
+                    try:
+                        if getattr(self, 'search_var', None):
+                            try:
+                                self.search_var.set('')
+                            except Exception:
+                                pass
+                            try:
+                                if getattr(self, 'search_status', None):
+                                    self.search_status.config(text='')
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     self.current_dir = item_path
                     # update path var/label
                     try:
