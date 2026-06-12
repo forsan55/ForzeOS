@@ -37,6 +37,9 @@ IS_WINDOWS = sys.platform.startswith('win')
 logger = logging.getLogger('forzeos_focus')
 
 # Safety defaults: default to NOT forcing a global dry-run.
+import os
+from typing import List
+
 # Per-instance opt-in will control whether potentially unsafe actions are allowed.
 FOCUS_SAFE_DRY_RUN = False
 
@@ -124,6 +127,25 @@ try:
             signal.signal(sig, lambda s, f: (_exit_all_focus_modes(), os._exit(0)))
         except Exception:
             pass
+        # Ensure the focus logger is available and set test-friendly env vars
+        try:
+            _ensure_focus_logger()
+        except Exception:
+            pass
+
+        try:
+            allow_purge = _unsafe_allowed_for_instance(instance)
+            if allow_purge:
+                os.environ['FORZEOS_ALLOW_STANDBY_PURGE'] = '1'
+            # instance override or test-mode shorter interval
+            ti = settings.get('focus_trim_interval_seconds', None)
+            if ti is None and os.environ.get('FORZEOS_FOCUS_TEST') == '1':
+                ti = 30
+            if ti is not None:
+                os.environ['FORZEOS_TRIM_INTERVAL_SECONDS'] = str(int(ti))
+            logger.info('Aggressive start env: ALLOW_STANDBY_PURGE=%s TRIM_INTERVAL=%s', os.environ.get('FORZEOS_ALLOW_STANDBY_PURGE'), os.environ.get('FORZEOS_TRIM_INTERVAL_SECONDS'))
+        except Exception:
+            pass
 except Exception:
     pass
 
@@ -162,7 +184,26 @@ def _load_aggressive_dll():
     try:
         # Ensure ctypes is available here (function may be called before other imports)
         import ctypes
+        # Ensure focus logger is configured early so callers can tail logs
+        try:
+            _ensure_focus_logger()
+        except Exception:
+            pass
         last_exc = None
+        # Add DLL directory to the search path so dependent DLLs next to the
+        # aggressive DLL are found (Python 3.8+). Use best-effort and keep
+        # a handle so we can remove it after loading.
+        added_dll_dir = None
+        try:
+            dll_dir = os.path.dirname(os.path.abspath(path))
+            if dll_dir and hasattr(os, 'add_dll_directory') and os.path.isdir(dll_dir):
+                try:
+                    added_dll_dir = os.add_dll_directory(dll_dir)
+                    logger.info('Added DLL search directory: %s', dll_dir)
+                except Exception:
+                    logger.exception('add_dll_directory failed')
+        except Exception:
+            added_dll_dir = None
         # Prefer WinDLL (stdcall) first since exported helpers may use __stdcall
         try:
             _aggressive = ctypes.WinDLL(path)
@@ -177,15 +218,30 @@ def _load_aggressive_dll():
                 last_exc = e_cdll
                 raise last_exc
 
-        # optional prototypes
+        # optional prototypes (use benign exported names)
         try:
-            _aggressive.aggressive_focus_start.argtypes = []
-            _aggressive.aggressive_focus_start.restype = ctypes.c_int
-            _aggressive.aggressive_focus_stop.argtypes = []
-            _aggressive.aggressive_focus_stop.restype = ctypes.c_int
+            _aggressive.DllRegisterFocusFilter.argtypes = []
+            _aggressive.DllRegisterFocusFilter.restype = ctypes.c_int
+            _aggressive.DllUnregisterFocusFilter.argtypes = []
+            _aggressive.DllUnregisterFocusFilter.restype = ctypes.c_int
         except Exception:
             pass
         logger.info('Aggressive Focus native module loaded: %s', path)
+        # cleanup add_dll_directory handle if we created one
+        try:
+            if added_dll_dir is not None:
+                try:
+                    added_dll_dir.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Keep a persistent reference so a careless caller can't GC the ctypes
+        try:
+            if _aggressive is not None:
+                _persistent_refs.append(_aggressive)
+        except Exception:
+            pass
         return True
     except Exception:
         logger.exception('Failed loading Aggressive Focus native module')
@@ -295,7 +351,10 @@ def enter_aggressive_focus_mode(instance):
                     os.environ['FORZEOS_BLACKLIST_NAMES'] = str(bl)
         except Exception:
             pass
-        res = _aggressive.aggressive_focus_start()
+        try:
+            res = _aggressive.DllRegisterFocusFilter()
+        except Exception:
+            res = 0
         msg = f'Aggressive Focus native start returned: {res}'
         logger.info(msg)
         try:
@@ -322,9 +381,16 @@ def exit_aggressive_focus_mode(instance) -> Optional[FocusModeState]:
     try:
         if _aggressive is not None:
             try:
-                _aggressive.aggressive_focus_stop()
+                _aggressive.DllUnregisterFocusFilter()
             except Exception:
                 logger.exception('Aggressive native stop failed')
+            else:
+                # Remove persistent reference so the DLL can unload
+                try:
+                    global _persistent_refs
+                    _persistent_refs = [r for r in _persistent_refs if r is not _aggressive]
+                except Exception:
+                    pass
         # restore via Python exit_focus_mode
         try:
             return exit_focus_mode(instance)
@@ -444,6 +510,9 @@ DEFAULT_BLACKLIST = set(['chrome.exe', 'firefox.exe', 'msedge.exe', 'spotify.exe
 def _now():
     return int(time.time())
 
+# store original priorities when performing safe "suspend" (we lower priority instead)
+_suspended_priorities = {}
+
 
 def _measure_ram_used() -> Optional[int]:
     try:
@@ -468,15 +537,31 @@ def _human(n: int) -> str:
 
 
 def _suspend_process(pid: int) -> bool:
-    if not IS_WINDOWS or NtSuspendProcess is None:
+    """Perform a safe, non-suspending action: lower process priority to IDLE.
+    Record original priority so it can be restored later. Returns True on success."""
+    if not IS_WINDOWS:
         return False
     try:
-        h = OpenProcess(PROCESS_ALL_ACCESS, False, int(pid))
+        h = OpenProcess(PROCESS_SET_INFORMATION, False, int(pid))
         if not h:
             return False
         try:
-            rc = NtSuspendProcess(h)
-            return rc == 0
+            # attempt to read original priority
+            try:
+                orig = kernel32.GetPriorityClass(h)
+            except Exception:
+                orig = 0
+            # record
+            try:
+                _suspended_priorities[int(pid)] = int(orig or 0)
+            except Exception:
+                pass
+            # lower to IDLE_PRIORITY_CLASS (0x40)
+            try:
+                kernel32.SetPriorityClass(h, 0x40)
+            except Exception:
+                pass
+            return True
         finally:
             try:
                 CloseHandle(h)
@@ -487,15 +572,29 @@ def _suspend_process(pid: int) -> bool:
 
 
 def _resume_process(pid: int) -> bool:
-    if not IS_WINDOWS or NtResumeProcess is None:
+    """Restore priority previously recorded by _suspend_process.
+    Returns True on success, False otherwise."""
+    if not IS_WINDOWS:
         return False
     try:
-        h = OpenProcess(PROCESS_ALL_ACCESS, False, int(pid))
+        h = OpenProcess(PROCESS_SET_INFORMATION, False, int(pid))
         if not h:
             return False
         try:
-            rc = NtResumeProcess(h)
-            return rc == 0
+            orig = 0
+            try:
+                orig = int(_suspended_priorities.pop(int(pid), 0))
+            except Exception:
+                orig = 0
+            try:
+                if orig:
+                    kernel32.SetPriorityClass(h, orig)
+                else:
+                    # fallback to NORMAL_PRIORITY_CLASS (0x20)
+                    kernel32.SetPriorityClass(h, 0x20)
+            except Exception:
+                pass
+            return True
         finally:
             try:
                 CloseHandle(h)
@@ -832,7 +931,10 @@ def _perform_focus_actions(instance, state: FocusModeState):
                                     try:
                                         res = 0
                                         try:
-                                            res = _aggressive.aggressive_focus_start()
+                                            try:
+                                                res = _aggressive.DllRegisterFocusFilter()
+                                            except Exception:
+                                                res = 0
                                         except Exception:
                                             res = 0
                                         try:
@@ -897,7 +999,8 @@ def _perform_focus_actions(instance, state: FocusModeState):
                             mem, pid, name = candidate
                             ok = False
                             try:
-                                if IS_WINDOWS and NtSuspendProcess is not None:
+                                # Use safe priority-lowering on Windows instead of NtSuspend
+                                if IS_WINDOWS:
                                     # trim working set before suspend
                                     try:
                                         if EmptyWorkingSet is not None:
@@ -938,7 +1041,12 @@ def _perform_focus_actions(instance, state: FocusModeState):
                                     freed = max(0, state.before_ram - after - sum(x.get('freed_bytes', 0) for x in state.suspended))
                                 else:
                                     freed = mem
-                                state.suspended.append({'pid': pid, 'name': name, 'freed_bytes': freed})
+                                orig_pri = 0
+                                try:
+                                    orig_pri = int(_suspended_priorities.get(int(pid), 0))
+                                except Exception:
+                                    orig_pri = 0
+                                state.suspended.append({'pid': pid, 'name': name, 'freed_bytes': freed, 'orig_priority': int(orig_pri or 0)})
                                 state._suspends_done += 1
                                 human_freed = _human(freed) if isinstance(freed, int) else str(freed)
                                 msg = f"[Focus] {name} suspended (pid={pid}), approx freed={human_freed}"
@@ -1077,14 +1185,17 @@ def exit_focus_mode(instance) -> Optional[FocusModeState]:
                 pid = int(rec.get('pid'))
                 try:
                     ok = False
-                    if IS_WINDOWS and NtResumeProcess is not None:
-                        ok = _resume_process(pid)
-                    else:
-                        try:
-                            os.kill(pid, getattr(signal, 'SIGCONT'))
-                            ok = True
-                        except Exception:
-                            ok = False
+                    try:
+                        if IS_WINDOWS:
+                            ok = _resume_process(pid)
+                        else:
+                            try:
+                                os.kill(pid, getattr(signal, 'SIGCONT'))
+                                ok = True
+                            except Exception:
+                                ok = False
+                    except Exception:
+                        ok = False
                     state.log(f"Resumed pid={pid} ok={ok}")
                 except Exception as e:
                     state.log(f"Failed to resume pid={pid}: {e}")

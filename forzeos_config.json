@@ -34,7 +34,7 @@
       "cursor_acceleration": 1.0,
       "profiles": []
     },
-    "resource_monitoring": false,
+    "resource_monitoring": true,
     "focus_mode_allow_unsafe": true,
     "login_panel_image": null,
     "loading_logo_image": null,
@@ -51,7 +51,8 @@
     "Terminal": "Ctrl+Alt+T",
     "Calculator": "Ctrl+Alt+C",
     "Settings": "Ctrl+Alt+S",
-    "Web Browser": "Ctrl+Alt+W"
+    "Web Browser": "Ctrl+Alt+W",
+    "Code Editor": "Ctrl+Alt+K"
   },
   "desktop": {
     "icon_positions": {

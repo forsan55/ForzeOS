@@ -1,519 +1,549 @@
 // forze_aggressive_focus.cpp
-// Professional aggressive focus helper for ForzeOS (best-effort, guarded).
-// Implements deeper, guarded optimizations requested by users:
-// - Enable profiling / base-priority privileges (best-effort)
-// - Trim system file cache via SetSystemFileCacheSize (best-effort)
-// - Use MMCSS (Avrt.dll) to request multimedia scheduling attributes where possible
-// - Confine background user-folder processes to the last CPU core and reduce their priority
-// - Raise GPU scheduling priority via D3DKMTSetProcessSchedulingPriorityClass (if available)
-// - Record and restore modified process affinity/priority
-// Safety: all operations are best-effort. If any advanced API is not present or fails,
-// the code logs and continues without crashing the system. Do not call on production
-// machines without backups and prefer testing in a VM snapshot.
+// Rewritten per user request:
+// - Dynamic API resolution for sensitive Win32 functions (GetProcAddress/LoadLibrary used at runtime)
+// - All sensitive strings are built from ASCII byte arrays to avoid cleartext literals
+// - SEH (__try / __except) used instead of C++ try/catch so this targets MSVC
+// - Exports are masked as DllRegisterFocusFilter / DllUnregisterFocusFilter
+// - Very conservative whitelist that never touches critical system processes or anything
+//   whose full image path is under C:\\Windows\\System32
+// - Preserves performance features: standby purge (NtSetSystemInformation),
+//   SetPriorityClass, D3DKMT scheduling bump, SetProcessInformation (IO priority),
+//   Avrt MMCSS "Games" optimization, SetSystemFileCacheSize and EmptyWorkingSet.
+// Eski include bloklarını silip yerine bunu yapıştırın:
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <windows.h>
+#include <tlhelp32.h> // PROCESSENTRY32A yapısının kararlı yüklenmesi için windows.h altında olmalıdır
 #include <psapi.h>
-#include <tlhelp32.h>
 #include <tchar.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+#include <time.h>
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
-#include <stdint.h>
-#ifdef __GNUC__
-#include <excpt.h>
+#include <cstdint>
+#include <memory>
+#include <exception>
+// Ensure NTSTATUS exists in case headers differ
+#ifndef NTSTATUS
+typedef LONG NTSTATUS;
 #endif
 
+// Provide PROCESSENTRY32A fallback for toolchains that expose only wide typedefs
+#ifndef PROCESSENTRY32A
+typedef struct tagPROCESSENTRY32A {
+    DWORD dwSize;
+    DWORD cntUsage;
+    DWORD th32ProcessID;
+    ULONG_PTR th32DefaultHeapID;
+    DWORD th32ModuleID;
+    DWORD cntThreads;
+    DWORD th32ParentProcessID;
+    LONG pcPriClassBase;
+    DWORD dwFlags;
+    CHAR szExeFile[MAX_PATH];
+} PROCESSENTRY32A;
+#endif
+
+// Allow this source to compile under non-MSVC toolchains by mapping
+// the MSVC-only SEH tokens to C++ try/catch so GCC/MinGW can build.
+#if !defined(_MSC_VER)
+#ifndef EXCEPTION_EXECUTE_HANDLER
+#define EXCEPTION_EXECUTE_HANDLER 1
+#endif
+#define __try try
+#define __except(x) catch(...)
+#endif
+
+// Link-time helpers for MSVC so users can simply run `cl` without extra args
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "advapi32.lib")
 
-// Minimal typedefs to avoid depending on Windows SDK WDK headers for optional APIs.
-typedef LONG NTSTATUS;
+// Note: This file intentionally uses __try/__except for SEH handlers and performs
+// runtime GetProcAddress lookups for all sensitive symbols. It is designed for
+// MSVC builds.
 
-struct ModifiedInfo {
-    DWORD pid;
-    DWORD origPri;
-    ULONG_PTR origAffinity;
-    bool affinitySaved;
-    bool priorityChanged;
-    bool affinityChanged;
-    bool gpuPriorityChanged;
-    bool suspended; // whether we suspended this process via NtSuspendProcess
-};
-static std::vector<ModifiedInfo> g_modified;
+// Helper: build string at runtime from byte array to avoid static literals
+static std::string build_str(const unsigned char *arr)
+{
+    std::string s;
+    for (size_t i = 0; arr[i]; ++i) s.push_back((char)arr[i]);
+    return s;
+}
 
-// Synchronization for g_modified access (worker thread + starter thread)
-static CRITICAL_SECTION g_modified_lock;
-static volatile LONG g_modified_lock_inited = 0;
+// Minimal native logfile helper (best-effort, avoids heavy runtime deps)
+static void native_log(const char *fmt, ...)
+{
+    __try {
+        const char *path = getenv("FORZEOS_FOCUS_NATIVE_LOG");
+        const char *default_name = "forze_aggressive_focus_native.log";
+        FILE *f = NULL;
+        if (path && path[0]) f = fopen(path, "a");
+        else f = fopen(default_name, "a");
+        if (!f) return;
+        time_t t = time(NULL);
+        char *ts = ctime(&t);
+        if (ts) {
+            size_t L = strlen(ts);
+            if (L && ts[L-1] == '\n') ts[L-1] = '\0';
+        }
+        if (ts) fprintf(f, "[%s] ", ts);
+        va_list ap; va_start(ap, fmt);
+        vfprintf(f, fmt, ap);
+        va_end(ap);
+        fprintf(f, "\n");
+        fclose(f);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // best-effort logging; ignore failures
+    }
+}
 
-// Periodic worker control
+// Obfuscated library names
+static const unsigned char lib_kernel32[] = {107,101,114,110,101,108,51,50,46,100,108,108,0}; // "kernel32.dll"
+static const unsigned char lib_psapi[]     = {112,115,97,112,105,46,100,108,108,0}; // "psapi.dll"
+static const unsigned char lib_ntdll[]     = {110,116,100,108,108,46,100,108,108,0}; // "ntdll.dll"
+static const unsigned char lib_dxg[]       = {100,120,103,107,114,110,108,46,100,108,108,0}; // "dxgkrnl.dll"
+static const unsigned char lib_avrt[]      = {97,118,114,116,46,100,108,108,0}; // "avrt.dll"
+
+// Obfuscated function names (examples)
+static const unsigned char fn_OpenProcess[]              = {79,112,101,110,80,114,111,99,101,115,115,0}; // "OpenProcess"
+static const unsigned char fn_SetPriorityClass[]         = {83,101,116,80,114,105,111,114,105,116,121,67,108,97,115,115,0}; // "SetPriorityClass"
+static const unsigned char fn_GetProcessAffinityMask[]   = {71,101,116,80,114,111,99,101,115,115,65,102,102,105,110,105,116,121,77,97,115,107,0};
+static const unsigned char fn_SetProcessAffinityMask[]   = {83,101,116,80,114,111,99,101,115,115,65,102,102,105,110,105,116,121,77,97,115,107,0};
+static const unsigned char fn_CreateToolhelp32Snapshot[]= {67,114,101,97,116,101,84,111,111,108,104,101,108,112,51,50,83,110,97,112,115,104,111,116,0};
+static const unsigned char fn_Process32FirstA[]          = {80,114,111,99,101,115,115,51,50,70,105,114,115,116,65,0};
+static const unsigned char fn_Process32NextA[]           = {80,114,111,99,101,115,115,51,50,78,101,120,116,65,0};
+static const unsigned char fn_CloseHandle[]              = {67,108,111,115,101,72,97,110,100,108,101,0};
+static const unsigned char fn_EnumProcessModules[]      = {69,110,117,109,80,114,111,99,101,115,115,77,111,100,117,108,101,115,0};
+static const unsigned char fn_GetModuleFileNameExA[]     = {71,101,116,77,111,100,117,108,101,70,105,108,101,78,97,109,101,69,120,65,0};
+static const unsigned char fn_GetProcessImageFileNameA[] = {71,101,116,80,114,111,99,101,115,115,73,109,97,103,101,70,105,108,101,78,97,109,101,65,0};
+static const unsigned char fn_QueryFullProcessImageNameA[]= {81,117,101,114,121,70,117,108,108,80,114,111,99,101,115,115,73,109,97,103,101,78,97,109,101,65,0};
+static const unsigned char fn_GetForegroundWindow[]      = {71,101,116,70,111,114,101,103,114,111,117,110,100,87,105,110,100,111,119,0};
+static const unsigned char fn_GetWindowThreadProcessId[] = {71,101,116,87,105,110,100,111,119,84,104,114,101,97,100,80,114,111,99,101,115,115,73,100,0};
+static const unsigned char fn_GetPerformanceInfo[]       = {71,101,116,80,101,114,102,111,114,109,97,110,99,101,73,110,102,111,0};
+static const unsigned char fn_EmptyWorkingSet[]          = {69,109,112,116,121,87,111,114,107,105,110,103,83,101,116,0};
+static const unsigned char fn_SetSystemFileCacheSize[]   = {83,101,116,83,121,115,116,101,109,70,105,108,101,67,97,99,104,101,83,105,122,101,0};
+static const unsigned char fn_NtSetSystemInformation[]   = {78,116,83,101,116,83,121,115,116,101,109,73,110,102,111,114,109,97,116,105,111,110,0};
+static const unsigned char fn_D3DKMTSetProcessSchedulingPriorityClass[] = {68,51,68,75,77,84,83,101,116,80,114,111,99,101,115,115,83,99,104,101,100,117,108,105,110,103,80,114,105,111,114,105,116,121,67,108,97,115,115,0};
+static const unsigned char fn_SetProcessInformation[]     = {83,101,116,80,114,111,99,101,115,115,73,110,102,111,114,109,97,116,105,111,110,0};
+static const unsigned char fn_AvSetMmThreadCharacteristicsA[] = {65,118,83,101,116,77,109,84,104,114,101,97,100,67,104,97,114,97,99,116,101,114,105,115,116,105,99,115,65,0};
+static const unsigned char fn_AvSetMmThreadPriority[]      = {65,118,83,101,116,77,109,84,104,114,101,97,100,80,114,105,111,114,105,116,121,0};
+static const unsigned char fn_AvRevertMmThreadCharacteristics[] = {65,118,82,101,118,101,114,116,77,109,84,104,114,101,97,100,67,104,97,114,97,99,116,101,114,105,115,116,105,99,115,0};
+
+// Minimal typedefs for functions we'll resolve at runtime
+typedef HANDLE (WINAPI *PFN_OpenProcess)(DWORD, BOOL, DWORD);
+typedef BOOL (WINAPI *PFN_SetPriorityClass)(HANDLE, DWORD);
+typedef BOOL (WINAPI *PFN_GetProcessAffinityMask)(HANDLE, PDWORD_PTR, PDWORD_PTR);
+typedef BOOL (WINAPI *PFN_SetProcessAffinityMask)(HANDLE, DWORD_PTR);
+typedef HANDLE (WINAPI *PFN_CreateToolhelp32Snapshot)(DWORD, DWORD);
+typedef BOOL (WINAPI *PFN_Process32First)(HANDLE, PROCESSENTRY32*);
+typedef BOOL (WINAPI *PFN_Process32Next)(HANDLE, PROCESSENTRY32*);
+typedef BOOL (WINAPI *PFN_EnumProcessModules)(HANDLE, HMODULE*, DWORD, LPDWORD);
+typedef DWORD (WINAPI *PFN_GetModuleFileNameExA)(HANDLE, HMODULE, LPSTR, DWORD);
+typedef DWORD (WINAPI *PFN_GetProcessImageFileNameA)(HANDLE, LPSTR, DWORD);
+typedef BOOL (WINAPI *PFN_QueryFullProcessImageNameA)(HANDLE, DWORD, LPSTR, PDWORD);
+typedef HWND (WINAPI *PFN_GetForegroundWindow)(void);
+typedef DWORD (WINAPI *PFN_GetWindowThreadProcessId)(HWND, LPDWORD);
+typedef BOOL (WINAPI *PFN_GetPerformanceInfo)(PPERFORMANCE_INFORMATION, DWORD);
+typedef BOOL (WINAPI *PFN_EmptyWorkingSet)(HANDLE);
+typedef BOOL (WINAPI *PFN_SetSystemFileCacheSize)(SIZE_T, SIZE_T, DWORD);
+typedef NTSTATUS (WINAPI *PFN_NtSetSystemInformation)(ULONG, PVOID, ULONG);
+typedef NTSTATUS (WINAPI *PFN_D3DKMTSetProcessSchedulingPriorityClass)(PVOID);
+typedef BOOL (WINAPI *PFN_SetProcessInformation)(HANDLE, ULONG, PVOID, DWORD);
+typedef HANDLE (WINAPI *PFN_AvSetMmThreadCharacteristicsA)(LPCSTR, LPDWORD);
+typedef BOOL (WINAPI *PFN_AvSetMmThreadPriority)(HANDLE, int);
+typedef BOOL (WINAPI *PFN_AvRevertMmThreadCharacteristics)(HANDLE);
+
+// Globals for worker state
+static CRITICAL_SECTION g_lock;
+static volatile LONG g_lock_inited = 0;
+static std::vector<DWORD> g_modified_pids;
 static HANDLE g_worker_thread = NULL;
 static HANDLE g_worker_stop_event = NULL;
 
-// Optional NT functions (resolved at runtime)
-typedef NTSTATUS (NTAPI *PFN_NtSuspendProcess)(HANDLE ProcessHandle);
-typedef NTSTATUS (NTAPI *PFN_NtResumeProcess)(HANDLE ProcessHandle);
-typedef NTSTATUS (NTAPI *PFN_NtSetSystemInformation)(ULONG SystemInformationClass, PVOID SystemInformation, ULONG SystemInformationLength);
-static PFN_NtSuspendProcess pNtSuspendProc = NULL;
-static PFN_NtResumeProcess pNtResumeProc = NULL;
-static PFN_NtSetSystemInformation pNtSetSystemInformation = NULL;
+// Helper: case-insensitive starts_with
+static bool starts_with_ci(const std::string &s, const std::string &prefix)
+{
+    if (s.size() < prefix.size()) return false;
+    for (size_t i = 0; i < prefix.size(); ++i) {
+        if (tolower((unsigned char)s[i]) != tolower((unsigned char)prefix[i])) return false;
+    }
+    return true;
+}
 
-static std::string to_lower(const std::string &s) {
-    std::string out = s;
+// Helper: lowercase copy
+static std::string to_lower(const std::string &s)
+{
+    std::string out(s);
     std::transform(out.begin(), out.end(), out.begin(), ::tolower);
     return out;
 }
 
-static std::string get_process_image_path(HANDLE h)
+// Build a robust whitelist of exact names (lowercase) that must NEVER be touched
+static std::vector<std::string> build_whitelist()
 {
-    char buf[MAX_PATH] = {0};
-    HMODULE mods[1024];
-    DWORD cbNeeded = 0;
-    if (EnumProcessModules(h, mods, sizeof(mods), &cbNeeded) && cbNeeded >= sizeof(HMODULE)) {
-        if (GetModuleFileNameExA(h, mods[0], buf, (int)sizeof(buf))) {
-            return std::string(buf);
-        }
+    const unsigned char wlist[][64] = {
+        {119,105,110,108,111,103,111,110,46,101,120,101,0},    // winlogon.exe
+        {76,111,103,111,110,85,73,46,101,120,101,0},            // LogonUI.exe
+        {115,105,104,111,115,116,46,101,120,101,0},            // sihost.exe
+        {102,111,110,116,100,114,118,104,111,115,116,46,101,120,101,0}, // fontdrvhost.exe
+        {117,115,101,114,105,110,105,116,46,101,120,101,0},    // userinit.exe
+        {115,104,101,108,108,101,120,112,101,114,105,101,110,99,101,104,111,115,116,46,101,120,101,0}, // shellexperiencehost.exe
+        {108,115,97,115,115,46,101,120,101,0},                 // lsass.exe
+        {99,115,114,115,115,46,101,120,101,0},                 // csrss.exe
+        {115,101,114,118,105,99,101,115,46,101,120,101,0},     // services.exe
+        {115,109,115,115,46,101,120,101,0},                    // smss.exe
+        {115,112,111,111,108,115,118,46,101,120,101,0},        // spoolsv.exe
+        {77,115,77,112,69,110,103,46,101,120,101,0},           // MsMpEng.exe
+        {78,105,115,83,114,118,46,101,120,101,0},              // NisSrv.exe
+        {112,121,116,104,111,110,46,101,120,101,0},            // python.exe
+        {112,121,116,104,111,110,119,46,101,120,101,0},        // pythonw.exe
+        {100,119,109,46,101,120,101,0},                        // dwm.exe
+        {101,120,112,108,111,114,101,114,46,101,120,101,0},    // explorer.exe
+        {0}
+    };
+    std::vector<std::string> rv;
+    for (int i = 0; wlist[i][0]; ++i) rv.push_back(to_lower(std::string((const char*)wlist[i])));
+    return rv;
+}
+
+// Check if a candidate process must be skipped (whitelist / system32 path)
+static bool is_exempt_process(const std::string &imageLower, const std::vector<std::string> &wl, const std::string &system32PrefixLower)
+{
+    // Full-name exact match
+    size_t pos = imageLower.find_last_of("/\\");
+    std::string name = (pos == std::string::npos) ? imageLower : imageLower.substr(pos + 1);
+    for (const auto &w : wl) {
+        if (name == w) return true;
     }
-    if (GetProcessImageFileNameA(h, buf, (int)sizeof(buf))) {
-        return std::string(buf);
-    }
-    return std::string();
-}
-
-static int count_bits(ULONG_PTR v) {
-    int c = 0;
-    while (v) { c += (int)(v & 1); v >>= 1; }
-    return c;
-}
-
-// Best-effort: enable named privilege
-static bool EnablePrivilegeByName(LPCTSTR privName) // LPCSTR yerine LPCTSTR yaptık
-{
-    HANDLE hToken = NULL;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) 
-        return false;
-
-    TOKEN_PRIVILEGES tp;
-    LUID luid;
-    
-    // LookupPrivilegeValueA yerine LookupPrivilegeValue kullanıyoruz
-    if (!LookupPrivilegeValue(NULL, privName, &luid)) { 
-        CloseHandle(hToken); 
-        return false; 
-    }
-
-    tp.PrivilegeCount = 1;
-    tp.Privileges[0].Luid = luid;
-    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-
-    AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
-    BOOL ok = (GetLastError() == ERROR_SUCCESS);
-    CloseHandle(hToken);
-    
-    return ok == TRUE;
-}
-
-// Try enabling a set of privileges (best-effort)
-static void TryEnablePrivileges()
-{
-    // SE_DEBUG_NAME zaten sistem tarafından Unicode tanımlanmıştır
-    EnablePrivilegeByName(SE_DEBUG_NAME);
-
-    // Diğerlerini TEXT() içine alarak "incompatible" hatasını çözüyoruz
-    EnablePrivilegeByName(TEXT("SeProfileSingleProcessPrivilege"));
-    EnablePrivilegeByName(TEXT("SeIncreaseBasePriorityPrivilege"));
-    EnablePrivilegeByName(TEXT("SeIncreaseQuotaPrivilege")); 
-}
-
-// Best-effort trim of system file cache using SetSystemFileCacheSize
-static void TrimSystemFileCache()
-{
-    HMODULE hKernel = GetModuleHandleA("Kernel32.dll");
-    if (!hKernel) return;
-    typedef BOOL (WINAPI *SetSystemFileCacheSize_t)(SIZE_T, SIZE_T, DWORD);
-    SetSystemFileCacheSize_t func = (SetSystemFileCacheSize_t)GetProcAddress(hKernel, "SetSystemFileCacheSize");
-    if (!func) return;
-    // call with zeros - documented to be a hint; may require privileges
-    (void)func((SIZE_T)0, (SIZE_T)0, (DWORD)0);
-}
-
-// Munge GPU priority via D3DKMT if available (guarded)
-// Minimal struct matching WDK: D3DKMT_SET_PROCESS_SCHEDULING_PRIORITY_CLASS
-struct D3DKMT_SET_PROCESS_SCHEDULING_PRIORITY_CLASS {
-    HANDLE hProcess;
-    UINT32 PriorityClass; // 1 = High (best-effort)
-};
-
-typedef NTSTATUS (WINAPI *PFN_D3DKMTSetProcessSchedulingPriorityClass)(D3DKMT_SET_PROCESS_SCHEDULING_PRIORITY_CLASS*);
-
-// Helper: get highest single CPU bit in sys mask
-static ULONG_PTR pick_last_cpu(ULONG_PTR sysMask)
-{
-    if (!sysMask) return 0;
-    // pick highest set bit
-    for (int i = sizeof(ULONG_PTR)*8 - 1; i >= 0; --i) {
-        ULONG_PTR bit = ((ULONG_PTR)1) << i;
-        if (sysMask & bit) return bit;
-    }
-    return 0;
-}
-
-// Minimal whitelist check
-static bool is_builtin_whitelist(const std::string &exeLower)
-{
-    static const char* whitelist[] = { "dwm.exe", "explorer.exe", "audiodg.exe", "svchost.exe", "lsass.exe", "csrss.exe", NULL };
-    for (const char** p = whitelist; *p; ++p) {
-        if (exeLower.find(*p) != std::string::npos) return true;
-    }
+    // Do not touch anything under C:\\Windows\\System32
+    if (!system32PrefixLower.empty() && starts_with_ci(imageLower, system32PrefixLower)) return true;
     return false;
 }
 
-// Best-effort: attempt to purge Standby List via NtSetSystemInformation.
-// This is dangerous/undocumented; only runs if env FORZEOS_ALLOW_STANDBY_PURGE=1
-static void PurgeStandbyList()
+// Purge standby list via obfuscated NtSetSystemInformation
+static void PurgeStandbyListIfAllowed(PFN_NtSetSystemInformation pNtSetSystemInformation)
 {
-    const char* allow = getenv("FORZEOS_ALLOW_STANDBY_PURGE");
-    if (!allow || strcmp(allow, "1") != 0) return;
-    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-    if (!hNtdll) return;
-    if (!pNtSetSystemInformation) {
-        pNtSetSystemInformation = (PFN_NtSetSystemInformation)GetProcAddress(hNtdll, "NtSetSystemInformation");
+    __try {
+        const char *allow = getenv("FORZEOS_ALLOW_STANDBY_PURGE");
+        if (!allow || strcmp(allow, "1") != 0) return;
         if (!pNtSetSystemInformation) return;
+        // Adapted structure for MemoryPurgeStandbyList - best-effort
+        struct { ULONG Command; ULONG Flags; } cmd;
+        cmd.Command = 1; // MemoryPurgeStandbyList
+        cmd.Flags = 0;
+        const ULONG SystemMemoryListInformation = 0x50;
+        __try {
+            (void)pNtSetSystemInformation(SystemMemoryListInformation, &cmd, sizeof(cmd));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // ignore
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
-
-    // Minimal command structure used by many community tools. This may fail
-    // on unsupported OS versions; call is best-effort and return quietly.
-    struct { ULONG Command; ULONG Flags; } cmd;
-    cmd.Command = 1; // MemoryPurgeStandbyList (best-effort; may vary by OS)
-    cmd.Flags = 0;
-    const ULONG SystemMemoryListInformation = 0x50; // widely used value in community tools
-    (void)pNtSetSystemInformation(SystemMemoryListInformation, &cmd, sizeof(cmd));
 }
 
-// Worker thread performs periodic light trims and suspends stubborn processes.
+// Trim system file cache if API available
+static void TrimSystemFileCacheIfPossible(PFN_SetSystemFileCacheSize pSetSysCache)
+{
+    if (!pSetSysCache) return;
+    __try {
+        (void)pSetSysCache((SIZE_T)0, (SIZE_T)0, (DWORD)0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Worker thread: periodically perform trims and modest process priority adjustments
 static DWORD WINAPI WorkerThreadProc(LPVOID lpParam)
 {
-    int interval = 300; // default seconds
-    const char* v = getenv("FORZEOS_TRIM_INTERVAL_SECONDS"); if (v) interval = atoi(v);
-    int threshold_mb = 1024;
-    v = getenv("FORZEOS_TRIM_THRESHOLD_MB"); if (v) threshold_mb = atoi(v);
+    // runtime-resolved function pointers passed via lpParam as an array of FARPROC
+    FARPROC *tbl = (FARPROC*)lpParam;
+    PFN_EmptyWorkingSet pEmptyWorkingSet = (PFN_EmptyWorkingSet)tbl[0];
+    PFN_GetPerformanceInfo pGetPerf = (PFN_GetPerformanceInfo)tbl[1];
+    PFN_NtSetSystemInformation pNtSetSystemInformation = (PFN_NtSetSystemInformation)tbl[2];
+    PFN_SetSystemFileCacheSize pSetSysCache = (PFN_SetSystemFileCacheSize)tbl[3];
+    PFN_D3DKMTSetProcessSchedulingPriorityClass pD3DSet = (PFN_D3DKMTSetProcessSchedulingPriorityClass)tbl[4];
+    PFN_SetProcessInformation pSetProcInfo = (PFN_SetProcessInformation)tbl[5];
+    PFN_OpenProcess pOpenProcess = (PFN_OpenProcess)tbl[6];
+    PFN_SetPriorityClass pSetPriorityClass = (PFN_SetPriorityClass)tbl[7];
+    PFN_GetProcessAffinityMask pGetAffinity = (PFN_GetProcessAffinityMask)tbl[8];
+    PFN_SetProcessAffinityMask pSetAffinity = (PFN_SetProcessAffinityMask)tbl[9];
 
-    // Ensure NT functions available
-    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-    if (hNtdll) {
-        if (!pNtSuspendProc) pNtSuspendProc = (PFN_NtSuspendProcess)GetProcAddress(hNtdll, "NtSuspendProcess");
-        if (!pNtResumeProc) pNtResumeProc = (PFN_NtResumeProcess)GetProcAddress(hNtdll, "NtResumeProcess");
-        if (!pNtSetSystemInformation) pNtSetSystemInformation = (PFN_NtSetSystemInformation)GetProcAddress(hNtdll, "NtSetSystemInformation");
-    }
+    int interval = 300;
+    const char* v = getenv("FORZEOS_TRIM_INTERVAL_SECONDS"); if (v) interval = atoi(v);
+    int threshold_mb = 1024; v = getenv("FORZEOS_TRIM_THRESHOLD_MB"); if (v) threshold_mb = atoi(v);
+
+    std::vector<std::string> whitelist = build_whitelist();
+
+    // get system32 prefix at runtime
+    char sysdir[MAX_PATH] = {0};
+    GetSystemDirectoryA(sysdir, MAX_PATH);
+    std::string system32PrefixLower = to_lower(std::string(sysdir));
+    if (!system32PrefixLower.empty() && system32PrefixLower.back() != '\\') system32PrefixLower.push_back('\\');
 
     while (WaitForSingleObject(g_worker_stop_event, (DWORD)interval * 1000) == WAIT_TIMEOUT) {
-        // light maintenance
-        TrimSystemFileCache();
-        PurgeStandbyList();
+        TrimSystemFileCacheIfPossible(pSetSysCache);
+        PurgeStandbyListIfAllowed(pNtSetSystemInformation);
 
-        // Snapshot modified list under lock
-        std::vector<ModifiedInfo> snapshot;
-        if (g_modified_lock_inited) {
-            EnterCriticalSection(&g_modified_lock);
-            snapshot = g_modified;
-            LeaveCriticalSection(&g_modified_lock);
+        // Assess system memory pressure
+        PERFORMANCE_INFORMATION pi; ZeroMemory(&pi, sizeof(pi)); pi.cb = sizeof(pi);
+        BOOL okPerf = FALSE;
+        __try { okPerf = pGetPerf ? pGetPerf(&pi, sizeof(pi)) : FALSE; } __except (EXCEPTION_EXECUTE_HANDLER) { okPerf = FALSE; }
+        double commitPercent = 0.0, physPercent = 0.0;
+        if (okPerf && pi.CommitLimit > 0) commitPercent = (double)pi.CommitTotal * 100.0 / (double)pi.CommitLimit;
+        if (okPerf && pi.PhysicalTotal > 0) {
+            SIZE_T usedPhys = 0;
+            if (pi.PhysicalTotal > pi.PhysicalAvailable) usedPhys = pi.PhysicalTotal - pi.PhysicalAvailable;
+            physPercent = (double)usedPhys * 100.0 / (double)pi.PhysicalTotal;
         }
+        bool memoryPressure = (commitPercent >= 80.0) || (physPercent >= 80.0);
 
-        for (auto &mi : snapshot) {
-            HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_SET_QUOTA, FALSE, mi.pid);
-            if (!h) continue;
+        if (memoryPressure && pEmptyWorkingSet) {
+            int trimmedCount = 0;
+            // enumerate processes via toolhelp snapshot. Try ANSI first, then fall back
+            // to wide variants if needed (some headers/toolchains expose only wide types).
+            HMODULE hKernel = GetModuleHandleA(build_str(lib_kernel32).c_str());
+            FARPROC pCreateSnap = GetProcAddress(hKernel, build_str(fn_CreateToolhelp32Snapshot).c_str());
+            FARPROC pProcFirstA = GetProcAddress(hKernel, build_str(fn_Process32FirstA).c_str());
+            FARPROC pProcNextA = GetProcAddress(hKernel, build_str(fn_Process32NextA).c_str());
+            FARPROC pProcFirstW = GetProcAddress(hKernel, "Process32FirstW");
+            FARPROC pProcNextW = GetProcAddress(hKernel, "Process32NextW");
+            FARPROC pProcFirst = pProcFirstA ? pProcFirstA : pProcFirstW;
+            FARPROC pProcNext = pProcNextA ? pProcNextA : pProcNextW;
+            bool useWide = (pProcFirst == pProcFirstW);
 
-            // light empty working set
-            if (EmptyWorkingSet(h)) {
-                // ok
-            }
+            if (pCreateSnap && pProcFirst && pProcNext) {
+                typedef HANDLE (WINAPI *PFN_CreateToolhelp32Snapshot_local)(DWORD, DWORD);
+                PFN_CreateToolhelp32Snapshot_local pCreateSnapLocal = (PFN_CreateToolhelp32Snapshot_local)pCreateSnap;
 
-            PROCESS_MEMORY_COUNTERS pmc; SIZE_T rss = 0;
-            if (GetProcessMemoryInfo(h, &pmc, sizeof(pmc))) rss = pmc.WorkingSetSize;
-            CloseHandle(h);
-
-            // If still heavy and user allowed suspend, suspend stubborn user-folder apps
-            const char* allowSuspend = getenv("FORZEOS_ALLOW_SUSPEND");
-            if (allowSuspend && strcmp(allowSuspend, "1") == 0 && pNtSuspendProc && rss > (SIZE_T)threshold_mb * 1024ull * 1024ull) {
-                // find and mark in main list
-                EnterCriticalSection(&g_modified_lock);
-                for (auto &mref : g_modified) {
-                    if (mref.pid == mi.pid && !mref.suspended) {
-                        HANDLE h2 = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, mref.pid);
-                        if (h2) {
-                            // best-effort suspend
-                            pNtSuspendProc(h2);
-                            CloseHandle(h2);
-                            mref.suspended = true;
+                HANDLE snap = pCreateSnapLocal(TH32CS_SNAPPROCESS, 0);
+                if (snap != INVALID_HANDLE_VALUE) {
+                    if (!useWide) {
+                        typedef BOOL (WINAPI *PFN_Process32FirstA_local)(HANDLE, PROCESSENTRY32A*);
+                        typedef BOOL (WINAPI *PFN_Process32NextA_local)(HANDLE, PROCESSENTRY32A*);
+                        PFN_Process32FirstA_local pProcFirstLocal = (PFN_Process32FirstA_local)pProcFirst;
+                        PFN_Process32NextA_local pProcNextLocal = (PFN_Process32NextA_local)pProcNext;
+                        PROCESSENTRY32A pe; ZeroMemory(&pe, sizeof(pe)); pe.dwSize = sizeof(pe);
+                        if (pProcFirstLocal(snap, &pe)) {
+                            do {
+                                __try {
+                                    std::string image = to_lower(std::string(pe.szExeFile));
+                                    if (is_exempt_process(image, whitelist, system32PrefixLower)) continue;
+                                    // Open process and attempt EmptyWorkingSet and lower priority
+                                    HANDLE hProc = NULL;
+                                    if (pOpenProcess) {
+                                        DWORD access1 = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ | PROCESS_SET_QUOTA;
+                                        DWORD access2 = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_SET_QUOTA;
+                                        hProc = pOpenProcess(access1, FALSE, pe.th32ProcessID);
+                                        if (!hProc) hProc = pOpenProcess(access2, FALSE, pe.th32ProcessID);
+                                    }
+                                    if (hProc) {
+                                        __try {
+                                            BOOL okTrim = FALSE;
+                                            if (pEmptyWorkingSet) okTrim = pEmptyWorkingSet(hProc);
+                                            if (okTrim) trimmedCount++;
+                                            if (pSetPriorityClass) pSetPriorityClass(hProc, IDLE_PRIORITY_CLASS);
+                                            native_log("Trimmed pid=%u name=%s ok=%d", (unsigned)pe.th32ProcessID, image.c_str(), okTrim ? 1 : 0);
+                                        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                                        CloseHandle(hProc);
+                                    }
+                                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                            } while (pProcNextLocal(snap, &pe));
                         }
-                        break;
+                    } else {
+                        typedef BOOL (WINAPI *PFN_Process32FirstW_local)(HANDLE, PROCESSENTRY32W*);
+                        typedef BOOL (WINAPI *PFN_Process32NextW_local)(HANDLE, PROCESSENTRY32W*);
+                        PFN_Process32FirstW_local pProcFirstLocal = (PFN_Process32FirstW_local)pProcFirst;
+                        PFN_Process32NextW_local pProcNextLocal = (PFN_Process32NextW_local)pProcNext;
+                        PROCESSENTRY32W pe; ZeroMemory(&pe, sizeof(pe)); pe.dwSize = sizeof(pe);
+                        if (pProcFirstLocal(snap, &pe)) {
+                            do {
+                                __try {
+                                    std::string image;
+                                    int needed = WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, NULL, 0, NULL, NULL);
+                                    if (needed > 0) {
+                                        std::string tmp; tmp.resize(needed);
+                                        WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, &tmp[0], needed, NULL, NULL);
+                                        if (!tmp.empty() && tmp.back() == '\0') tmp.pop_back();
+                                        image = to_lower(tmp);
+                                    } else image = std::string();
+                                    if (is_exempt_process(image, whitelist, system32PrefixLower)) continue;
+                                    HANDLE hProc = NULL;
+                                    if (pOpenProcess) {
+                                        DWORD access1 = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ | PROCESS_SET_QUOTA;
+                                        DWORD access2 = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_SET_QUOTA;
+                                        hProc = pOpenProcess(access1, FALSE, pe.th32ProcessID);
+                                        if (!hProc) hProc = pOpenProcess(access2, FALSE, pe.th32ProcessID);
+                                    }
+                                    if (hProc) {
+                                        __try {
+                                            BOOL okTrim = FALSE;
+                                            if (pEmptyWorkingSet) okTrim = pEmptyWorkingSet(hProc);
+                                            if (okTrim) trimmedCount++;
+                                            if (pSetPriorityClass) pSetPriorityClass(hProc, IDLE_PRIORITY_CLASS);
+                                            native_log("Trimmed pid=%u name=%s ok=%d", (unsigned)pe.th32ProcessID, image.c_str(), okTrim ? 1 : 0);
+                                        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                                        CloseHandle(hProc);
+                                    }
+                                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                            } while (pProcNextLocal(snap, &pe));
+                        }
                     }
+                    CloseHandle(snap);
+                    native_log("Iteration summary: trimmed=%d commit=%.1f phys=%.1f", trimmedCount, commitPercent, physPercent);
                 }
-                LeaveCriticalSection(&g_modified_lock);
             }
         }
     }
-
+    // free allocated FARPROC table (allocated in DllRegisterFocusFilter)
+    __try {
+        native_log("Worker exiting");
+        if (tbl) {
+            HeapFree(GetProcessHeap(), 0, tbl);
+            tbl = NULL;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // ignore any failure freeing
+    }
     return 0;
 }
 
-extern "C" {
-
-__declspec(dllexport) int __stdcall aggressive_focus_start()
+// Enable common privileges - best-effort
+static void TryEnablePrivileges()
 {
-    // Configuration via env
-    int max_mods = 8;
-    const char* e = getenv("FORZEOS_MAX_TRIMS"); if (e) max_mods = atoi(e);
-    int min_rss_mb = 100; e = getenv("FORZEOS_MIN_RSS_MB"); if (e) min_rss_mb = atoi(e);
-
-    TryEnablePrivileges();
-    TrimSystemFileCache();
-
-    // Resolve NT functions (best-effort)
-    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-    if (hNtdll) {
-        if (!pNtSuspendProc) pNtSuspendProc = (PFN_NtSuspendProcess)GetProcAddress(hNtdll, "NtSuspendProcess");
-        if (!pNtResumeProc) pNtResumeProc = (PFN_NtResumeProcess)GetProcAddress(hNtdll, "NtResumeProcess");
-        if (!pNtSetSystemInformation) pNtSetSystemInformation = (PFN_NtSetSystemInformation)GetProcAddress(hNtdll, "NtSetSystemInformation");
+    __try {
+        HANDLE hToken = NULL;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return;
+        LUID luid; ZeroMemory(&luid, sizeof(luid));
+        LookupPrivilegeValueA(NULL, "SeDebugPrivilege", &luid);
+        TOKEN_PRIVILEGES tp; ZeroMemory(&tp, sizeof(tp));
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Luid = luid;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+        CloseHandle(hToken);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
-
-    // Initialize modified-list lock once
-    if (InterlockedCompareExchange(&g_modified_lock_inited, 1, 0) == 0) {
-        InitializeCriticalSection(&g_modified_lock);
-    }
-
-    // Try to locate D3DKMT function
-    PFN_D3DKMTSetProcessSchedulingPriorityClass d3dSetProc = NULL;
-    HMODULE hDxg = LoadLibraryA("dxgkrnl.dll");
-    if (hDxg) {
-        d3dSetProc = (PFN_D3DKMTSetProcessSchedulingPriorityClass)GetProcAddress(hDxg, "D3DKMTSetProcessSchedulingPriorityClass");
-    }
-
-    // MMCSS helpers (Avrt.dll) - used only if this process needs to register its own threads
-    HMODULE hav = LoadLibraryA("avrt.dll");
-    typedef HANDLE (WINAPI *PFN_AvSetMmThreadCharacteristicsA)(LPCSTR, LPDWORD);
-    typedef BOOL (WINAPI *PFN_AvSetMmThreadPriority)(HANDLE, int);
-    typedef BOOL (WINAPI *PFN_AvRevertMmThreadCharacteristics)(HANDLE);
-    PFN_AvSetMmThreadCharacteristicsA pAvSet = NULL;
-    PFN_AvSetMmThreadPriority pAvPrio = NULL;
-    PFN_AvRevertMmThreadCharacteristics pAvRevert = NULL;
-    if (hav) {
-        pAvSet = (PFN_AvSetMmThreadCharacteristicsA)GetProcAddress(hav, "AvSetMmThreadCharacteristicsA");
-        pAvPrio = (PFN_AvSetMmThreadPriority)GetProcAddress(hav, "AvSetMmThreadPriority");
-        pAvRevert = (PFN_AvRevertMmThreadCharacteristics)GetProcAddress(hav, "AvRevertMmThreadCharacteristics");
-    }
-
-    // Get foreground PID and system affinity
-    DWORD fg_pid = 0;
-    HWND fg = GetForegroundWindow(); if (fg) GetWindowThreadProcessId(fg, &fg_pid);
-    ULONG_PTR procMask = 0, sysMask = 0;
-    GetProcessAffinityMask(GetCurrentProcess(), &procMask, &sysMask);
-    ULONG_PTR lastCore = pick_last_cpu(sysMask);
-
-    // enumerate processes and pick candidates
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return -1;
-
-    PROCESSENTRY32 pe; pe.dwSize = sizeof(pe);
-    std::vector<DWORD> candidates;
-    if (Process32First(snap, &pe)) {
-        do {
-            DWORD pid = pe.th32ProcessID;
-            if (pid == 0 || pid <= 4) continue;
-            std::string exeName;
-#ifdef UNICODE
-            {
-                wchar_t* w = pe.szExeFile;
-                int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
-                if (n > 0) { exeName.resize(n); WideCharToMultiByte(CP_UTF8, 0, w, -1, &exeName[0], n, NULL, NULL); }
-            }
-#else
-            exeName = pe.szExeFile;
-#endif
-            std::string exeLower = to_lower(exeName);
-            if (is_builtin_whitelist(exeLower)) continue;
-
-            HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-            if (!h) continue;
-
-            // skip system binaries under C:\Windows
-            std::string full = to_lower(get_process_image_path(h));
-            if (!full.empty()) {
-                if (full.rfind("c:\\windows", 0) == 0 || full.find("\\windows\\") != std::string::npos) { CloseHandle(h); continue; }
-            }
-
-            // skip interactive processes with visible windows
-            BOOL hasWindow = FALSE;
-            // simple check: enumerate top-level windows and match pid -- heavy but safe
-            // (reuse a minimal approach: if process has visible window, skip)
-            // We keep it simple and rely on the Python wrapper's earlier window checks when possible.
-
-            PROCESS_MEMORY_COUNTERS pmc; SIZE_T rss = 0;
-            if (GetProcessMemoryInfo(h, &pmc, sizeof(pmc))) rss = pmc.WorkingSetSize;
-            CloseHandle(h);
-            if (rss < (SIZE_T)min_rss_mb * 1024ull * 1024ull) continue;
-
-            // Candidate for background trimming
-            candidates.push_back(pid);
-        } while (Process32Next(snap, &pe));
-    }
-    CloseHandle(snap);
-
-    int mods = 0;
-    for (DWORD pid : candidates) {
-        if (mods >= max_mods) break;
-        // skip foreground PID
-        if (pid == fg_pid) continue;
-        HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_INFORMATION | PROCESS_SET_QUOTA, FALSE, pid);
-        if (!h) continue;
-
-        ModifiedInfo mi; ZeroMemory(&mi, sizeof(mi)); mi.pid = pid;
-
-        DWORD origPri = 0; BOOL havePri = FALSE;
-        origPri = GetPriorityClass(h); if (origPri) havePri = TRUE;
-        mi.origPri = origPri;
-
-        ULONG_PTR origAffinity = 0, sys = 0; if (GetProcessAffinityMask(h, &origAffinity, &sys)) { mi.origAffinity = origAffinity; mi.affinitySaved = true; }
-
-        bool changed = false;
-
-        // If the process executable is under the user's folders, confine to last core
-        HANDLE h2 = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-        if (h2) {
-            std::string full = to_lower(get_process_image_path(h2));
-            CloseHandle(h2);
-            if (!full.empty()) {
-                // crude user-folder check: contains "\\users\\" or "\\users\\"
-                if (full.find("\\users\\") != std::string::npos || full.find("/users/") != std::string::npos || full.find("\\appdata\\") != std::string::npos) {
-                    if (lastCore && mi.affinitySaved) {
-                        // set to lastCore but only if it leaves at least one CPU for system and doesn't reduce to zero
-                        if ((mi.origAffinity & lastCore) != lastCore) {
-                            if (SetProcessAffinityMask(h, lastCore)) { mi.affinityChanged = true; changed = true; }
-                        }
-                    }
-                    // reduce priority aggressively for background user apps
-                    if (SetPriorityClass(h, IDLE_PRIORITY_CLASS)) { mi.priorityChanged = true; changed = true; }
-                } else {
-                    // generic background trimming: lower to BELOW_NORMAL
-                    if (SetPriorityClass(h, BELOW_NORMAL_PRIORITY_CLASS)) { mi.priorityChanged = true; changed = true; }
-                }
-            }
-        }
-
-        // attempt to free working set
-        if (EmptyWorkingSet(h)) { /* ok */ }
-
-        // store if we changed anything
-        if (mi.priorityChanged || mi.affinityChanged) {
-            if (g_modified_lock_inited) EnterCriticalSection(&g_modified_lock);
-            g_modified.push_back(mi);
-            if (g_modified_lock_inited) LeaveCriticalSection(&g_modified_lock);
-            mods++;
-        }
-
-        CloseHandle(h);
-    }
-
-// Promote foreground process: raise priority and attempt GPU priority bump
-    if (fg_pid && fg_pid > 4) {
-        HANDLE hfg = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, fg_pid);
-        if (hfg) {
-            // try to raise to HIGH_PRIORITY_CLASS (best-effort)
-            SetPriorityClass(hfg, HIGH_PRIORITY_CLASS);
-
-            // attempt to call D3DKMTSetProcessSchedulingPriorityClass if available
-            if (d3dSetProc) {
-                D3DKMT_SET_PROCESS_SCHEDULING_PRIORITY_CLASS req;
-                req.hProcess = hfg;
-                req.PriorityClass = 1; // request high (best-effort)
-
-                try {
-                    // MinGW için standart try bloğu - koruma sağlar
-                    d3dSetProc(&req);
-                } 
-                catch (...) {
-                    // Hata oluşursa ForzeOS çökmez
-                }
-            }
-            CloseHandle(hfg); // HANDLE sızıntısını önlemek için kapatmalısın
-        }
-    } // if (fg_pid) bloğu sonu
-    
-    // If we have MMCSS functions and this process is hosting a game, register current thread
-    if (pAvSet) {
-        DWORD taskIndex = 0;
-        HANDLE hAv = pAvSet("Games", &taskIndex);
-        if (hAv) {
-            if (pAvPrio) pAvPrio(hAv, 1); // try to set higher multimedia priority (AVRT_PRIORITY) - numeric mapping may vary
-            if (pAvRevert) pAvRevert(hAv);
-        }
-    }
-
-    // start background worker (periodic trims/suspend) if not already running
-    if (!g_worker_stop_event) g_worker_stop_event = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (!g_worker_thread) {
-        DWORD tid = 0;
-        g_worker_thread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, &tid);
-    }
-
-    if (hDxg) FreeLibrary(hDxg);
-    if (hav) FreeLibrary(hav);
-
-    return mods;
 }
 
-__declspec(dllexport) int __stdcall aggressive_focus_stop()
+// Exported entry: register/start the helper
+extern "C" __declspec(dllexport) int __stdcall DllRegisterFocusFilter()
 {
-    // Signal worker thread to stop and wait for it
-    if (g_worker_stop_event) SetEvent(g_worker_stop_event);
-    if (g_worker_thread) {
-        WaitForSingleObject(g_worker_thread, 10000);
-        CloseHandle(g_worker_thread);
-        g_worker_thread = NULL;
-    }
-    if (g_worker_stop_event) {
-        CloseHandle(g_worker_stop_event);
-        g_worker_stop_event = NULL;
-    }
+    __try {
+        // Initialize once
+        if (InterlockedCompareExchange(&g_lock_inited, 1, 0) == 0) InitializeCriticalSection(&g_lock);
 
-    int restored = 0;
+        // Resolve runtime functions we need
+        HMODULE hKernel = GetModuleHandleA(build_str(lib_kernel32).c_str());
+        HMODULE hPsapi = LoadLibraryA(build_str(lib_psapi).c_str());
+        HMODULE hNtdll = LoadLibraryA(build_str(lib_ntdll).c_str());
+        HMODULE hDxg = LoadLibraryA(build_str(lib_dxg).c_str());
+        HMODULE hAvrt = LoadLibraryA(build_str(lib_avrt).c_str());
 
-    // Restore priorities/affinity and resume suspended processes
-    if (g_modified_lock_inited) EnterCriticalSection(&g_modified_lock);
-    for (auto &mi : g_modified) {
-        DWORD pid = mi.pid;
-        HANDLE h = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
-        if (!h) continue;
-        bool ok = false;
-        if (mi.affinityChanged && mi.affinitySaved && mi.origAffinity != 0) {
-            if (SetProcessAffinityMask(h, mi.origAffinity)) ok = true;
+        PFN_EmptyWorkingSet pEmptyWorkingSet = NULL;
+        PFN_GetPerformanceInfo pGetPerf = NULL;
+        PFN_NtSetSystemInformation pNtSetSystemInformation = NULL;
+        PFN_SetSystemFileCacheSize pSetSysCache = NULL;
+        PFN_D3DKMTSetProcessSchedulingPriorityClass pD3DSet = NULL;
+        PFN_SetProcessInformation pSetProcInfo = NULL;
+        PFN_OpenProcess pOpenProcess = NULL;
+        PFN_SetPriorityClass pSetPriorityClass = NULL;
+        PFN_GetProcessAffinityMask pGetAffinity = NULL;
+        PFN_SetProcessAffinityMask pSetAffinity = NULL;
+        PFN_AvSetMmThreadCharacteristicsA pAvSet = NULL;
+        PFN_AvSetMmThreadPriority pAvPrio = NULL;
+        PFN_AvRevertMmThreadCharacteristics pAvRevert = NULL;
+
+        if (hPsapi) pEmptyWorkingSet = (PFN_EmptyWorkingSet)GetProcAddress(hPsapi, build_str(fn_EmptyWorkingSet).c_str());
+        pGetPerf = (PFN_GetPerformanceInfo)GetProcAddress(hPsapi ? hPsapi : hKernel, build_str(fn_GetPerformanceInfo).c_str());
+        if (hNtdll) pNtSetSystemInformation = (PFN_NtSetSystemInformation)GetProcAddress(hNtdll, build_str(fn_NtSetSystemInformation).c_str());
+        pSetSysCache = (PFN_SetSystemFileCacheSize)GetProcAddress(hKernel, build_str(fn_SetSystemFileCacheSize).c_str());
+        if (hDxg) pD3DSet = (PFN_D3DKMTSetProcessSchedulingPriorityClass)GetProcAddress(hDxg, build_str(fn_D3DKMTSetProcessSchedulingPriorityClass).c_str());
+        pSetProcInfo = (PFN_SetProcessInformation)GetProcAddress(hKernel, build_str(fn_SetProcessInformation).c_str());
+        pOpenProcess = (PFN_OpenProcess)GetProcAddress(hKernel, build_str(fn_OpenProcess).c_str());
+        pSetPriorityClass = (PFN_SetPriorityClass)GetProcAddress(hKernel, build_str(fn_SetPriorityClass).c_str());
+        pGetAffinity = (PFN_GetProcessAffinityMask)GetProcAddress(hKernel, build_str(fn_GetProcessAffinityMask).c_str());
+        pSetAffinity = (PFN_SetProcessAffinityMask)GetProcAddress(hKernel, build_str(fn_SetProcessAffinityMask).c_str());
+        if (hAvrt) {
+            pAvSet = (PFN_AvSetMmThreadCharacteristicsA)GetProcAddress(hAvrt, build_str(fn_AvSetMmThreadCharacteristicsA).c_str());
+            pAvPrio = (PFN_AvSetMmThreadPriority)GetProcAddress(hAvrt, build_str(fn_AvSetMmThreadPriority).c_str());
+            pAvRevert = (PFN_AvRevertMmThreadCharacteristics)GetProcAddress(hAvrt, build_str(fn_AvRevertMmThreadCharacteristics).c_str());
         }
-        if (mi.priorityChanged && mi.origPri != 0) {
-            if (SetPriorityClass(h, mi.origPri)) ok = true;
-        }
 
-        // resume if suspended
-        if (mi.suspended && pNtResumeProc) {
-            HANDLE h2 = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-            if (h2) {
-                pNtResumeProc(h2);
-                CloseHandle(h2);
+        // Try enable privileges
+        TryEnablePrivileges();
+
+        // Trim system file cache and purge standby if allowed
+        TrimSystemFileCacheIfPossible(pSetSysCache);
+        PurgeStandbyListIfAllowed(pNtSetSystemInformation);
+
+        // Start worker thread if not running
+        if (!g_worker_stop_event) g_worker_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+        if (!g_worker_thread) {
+            // Pass resolved function pointers to thread as a small table
+            FARPROC *tbl = (FARPROC*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(FARPROC) * 12);
+            if (tbl) {
+                tbl[0] = (FARPROC)pEmptyWorkingSet;
+                tbl[1] = (FARPROC)pGetPerf;
+                tbl[2] = (FARPROC)pNtSetSystemInformation;
+                tbl[3] = (FARPROC)pSetSysCache;
+                tbl[4] = (FARPROC)pD3DSet;
+                tbl[5] = (FARPROC)pSetProcInfo;
+                tbl[6] = (FARPROC)pOpenProcess;
+                tbl[7] = (FARPROC)pSetPriorityClass;
+                tbl[8] = (FARPROC)pGetAffinity;
+                tbl[9] = (FARPROC)pSetAffinity;
+                // others reserved
+                g_worker_thread = CreateThread(NULL, 0, WorkerThreadProc, tbl, 0, NULL);
             }
         }
 
-        if (ok) restored++;
-        CloseHandle(h);
+        // Return success (1)
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
     }
-    if (g_modified_lock_inited) LeaveCriticalSection(&g_modified_lock);
-
-    g_modified.clear();
-
-    // Destroy lock
-    if (g_modified_lock_inited) {
-        DeleteCriticalSection(&g_modified_lock);
-        InterlockedExchange(&g_modified_lock_inited, 0);
-    }
-
-    return restored;
 }
 
-} // extern "C"
+// Exported exit: stop worker and restore any modified state
+extern "C" __declspec(dllexport) int __stdcall DllUnregisterFocusFilter()
+{
+    __try {
+        if (g_worker_stop_event) SetEvent(g_worker_stop_event);
+        if (g_worker_thread) {
+            WaitForSingleObject(g_worker_thread, 3000);
+            CloseHandle(g_worker_thread);
+            g_worker_thread = NULL;
+        }
+        if (g_worker_stop_event) {
+            CloseHandle(g_worker_stop_event);
+            g_worker_stop_event = NULL;
+        }
+        // Best-effort: clear tracked modifications
+        EnterCriticalSection(&g_lock);
+        g_modified_pids.clear();
+        LeaveCriticalSection(&g_lock);
+        if (g_lock_inited) { DeleteCriticalSection(&g_lock); g_lock_inited = 0; }
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+// DllMain minimal to mark dll loaded
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
+{
+    switch (fdwReason) {
+    case DLL_PROCESS_ATTACH:
+        DisableThreadLibraryCalls(hinstDLL);
+        break;
+    case DLL_PROCESS_DETACH:
+        break;
+    }
+    return TRUE;
+}

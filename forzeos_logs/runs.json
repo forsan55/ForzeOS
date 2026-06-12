@@ -1,0 +1,28 @@
+[
+  {
+    "app": "7z",
+    "pid": 22876,
+    "action": "started",
+    "time": "2026-06-07T17:13:12.347942",
+    "user": "User"
+  },
+  {
+    "app": "7z",
+    "pid": 22876,
+    "action": "exited",
+    "time": "2026-06-07T17:13:13.151339",
+    "user": "User"
+  },
+  {
+    "user": "User",
+    "cmd": "C:\\Users\\User\\AppData\\Local\\Microsoft\\WindowsApps\\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forze_run_sjcddcdz.py",
+    "cwd": "C:\\Windows\\System32",
+    "run_type": "normal",
+    "start_time": "2026-06-07T17:13:21.336515",
+    "pid": 9016,
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "",
+    "end_time": "2026-06-07T17:13:21.379979"
+  }
+]
