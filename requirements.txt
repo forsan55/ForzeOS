@@ -1,4 +1,4 @@
-tkinterweb
+﻿tkinterweb
 PyQt5
 pywebview
 psutil

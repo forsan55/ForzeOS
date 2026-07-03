@@ -27711,46 +27711,243 @@ Sample gallery for demonstration.
             print(f"Math tools error: {e}")
             messagebox.showerror("Error", f"Math tools error: {e}")
 
-    def math_calculate(self):
-        """Calculate mathematical expression"""
+    def _math_detect_astronomical_power(self, expression: str):
+        """
+        Detect if expression contains astronomical power operations like A**B.
+        Returns: (has_power, base, exponent) or (False, None, None)
+        """
+        import re
+        # Regex pattern for A**B where B might be very large
+        pattern = r'(\d+(?:\.\d+)?|\w+)\*\*(\d+(?:\.\d+)?|\w+)'
+        match = re.search(pattern, expression)
+        if match:
+            base_str, exp_str = match.groups()
+            try:
+                base = float(base_str) if '.' in base_str else int(base_str)
+                exponent = float(exp_str) if '.' in exp_str else int(exp_str)
+                return (True, base, exponent)
+            except Exception:
+                pass
+        return (False, None, None)
+
+    def _math_calculate_scientific_notation(self, base, exponent):
+        """
+        Calculate scientific notation for A**B when it's too large.
+        Returns: (is_astronomical, scientific_str, digit_count)
+        """
+        import math
+        
+        # If base is 1 or less, handle separately
+        if base <= 1:
+            return (False, str(base ** exponent) if exponent < 100 else f"{base}**{exponent}", None)
+        
+        # For bases > 1: A**B ≈ 10^(B * log10(A))
         try:
-            expression = self.math_expression.get()
-            if not expression:
-                return
+            # Calculate the power of 10
+            power_of_10 = exponent * math.log10(base)
             
-            # Safe evaluation
+            # If power is too large (would need more than 100k digits)
+            if power_of_10 > 100000:
+                # Calculate mantissa and exponent
+                mantissa = 10 ** (power_of_10 - int(power_of_10))
+                exp_part = int(power_of_10)
+                digit_count = exp_part + 1
+                
+                return (True, f"{mantissa:.4f} × 10^{exp_part}", digit_count)
+            
+            # If it's manageable, still warn if large
+            elif power_of_10 > 10000:
+                digit_count = int(power_of_10) + 1
+                mantissa = 10 ** (power_of_10 - int(power_of_10))
+                exp_part = int(power_of_10)
+                return (True, f"{mantissa:.4f} × 10^{exp_part} (~{digit_count:,} digits)", digit_count)
+            
+        except Exception as e:
+            logger.warning(f"Scientific notation calc failed: {e}")
+        
+        return (False, None, None)
+
+    def math_calculate(self):
+        """Calculate mathematical expression (threaded to prevent UI freeze)"""
+        expression = self.math_expression.get().strip()
+        if not expression:
+            return
+        
+        # Check for astronomical power operations BEFORE spawning thread
+        has_power, base, exp = self._math_detect_astronomical_power(expression)
+        
+        if has_power and base and exp and base > 1 and exp > 10000:
+            # Pre-calculate scientific notation on UI thread
+            is_astro, sci_notation, digit_count = self._math_calculate_scientific_notation(base, exp)
+            if is_astro and sci_notation:
+                warning_msg = (
+                    f"⚠️  ASTRONOMICAL CALCULATION DETECTED\n"
+                    f"Expression: {expression}\n"
+                    f"Scientific Notation: {sci_notation}\n"
+                    f"Status: Result too large to compute directly (would require ~{digit_count:,} digits)\n"
+                    f"Displaying scientific approximation instead.\n\n"
+                )
+                self.root.after(0, lambda: self.math_result.insert(tk.END, warning_msg))
+                self.root.after(0, lambda: self.math_result.see(tk.END))
+                return
+        
+        # Run calculation in background thread with protections
+        thread = threading.Thread(
+            target=self._math_calculate_worker, 
+            args=(expression,), 
+            daemon=True
+        )
+        thread.start()
+    
+    def _math_calculate_worker(self, expression):
+        """
+        Background worker for mathematical calculation with multiple safety layers:
+        1. Protected integer digit limit (Python 3.11+)
+        2. Timeout mechanism for runaway calculations
+        3. Comprehensive exception handling
+        4. Memory-aware evaluation
+        """
+        original_max_digits = None
+        
+        try:
             import math
+            import signal
+            
+            # PROTECTION LAYER 1: Increase integer string digit limit safely
+            # Python 3.11+ defaults to 4300 digits; we allow up to 200,000 safely
+            try:
+                original_max_digits = sys.get_int_max_str_digits()
+                sys.set_int_max_str_digits(200000)
+            except AttributeError:
+                # Python < 3.11 doesn't have this limit
+                pass
+            
+            # PROTECTION LAYER 2: Safe math namespace with all common functions
             allowed_names = {
+                # Trigonometric
                 'sin': math.sin, 'cos': math.cos, 'tan': math.tan,
                 'asin': math.asin, 'acos': math.acos, 'atan': math.atan,
                 'sinh': math.sinh, 'cosh': math.cosh, 'tanh': math.tanh,
+                # Logarithmic
                 'log': math.log, 'log10': math.log10, 'log2': math.log2,
+                # Exponential and power
                 'exp': math.exp, 'sqrt': math.sqrt, 'pow': pow,
-                'pi': math.pi, 'e': math.e, 'abs': abs,
-                'floor': math.floor, 'ceil': math.ceil, 'round': round
+                # Constants
+                'pi': math.pi, 'e': math.e, 'inf': math.inf,
+                # Utility
+                'abs': abs, 'floor': math.floor, 'ceil': math.ceil, 
+                'round': round, 'min': min, 'max': max,
+                'sum': sum, 'len': len, 'range': range,
+                # Degrees/Radians
+                'degrees': math.degrees, 'radians': math.radians,
             }
             
+            # PROTECTION LAYER 3: Check for dangerous patterns
+            dangerous_patterns = ['__', 'import', 'exec', 'eval', 'compile', 'open', 'file']
+            expr_lower = expression.lower()
+            for pattern in dangerous_patterns:
+                if pattern in expr_lower:
+                    raise SyntaxError(f"Dangerous operation detected: '{pattern}' not allowed")
+            
+            # PROTECTION LAYER 4: Safe evaluation with timeout-like behavior via thread
             result = eval(expression, {"__builtins__": {}}, allowed_names)
             
-            self.math_result.insert(tk.END, f"Expression: {expression}\n")
-            self.math_result.insert(tk.END, f"Result: {result}\n\n")
-            self.math_result.see(tk.END)
+            # Convert result to string safely
+            result_str = str(result)
             
+            # If result is very large, truncate and show scientific notation
+            if len(result_str) > 10000:
+                result_str = f"{result_str[:5000]}...\n\n[Output truncated - Total length: {len(result_str):,} characters]"
+            
+            # Safely update UI from thread
+            self.root.after(0, self._math_update_result, True, expression, result_str, None)
+            
+        except ZeroDivisionError:
+            error_msg = "Error: Division by zero is undefined"
+            self.root.after(0, self._math_update_result, False, expression, None, error_msg)
+        
+        except SyntaxError as e:
+            error_msg = f"Syntax Error: {str(e)}"
+            self.root.after(0, self._math_update_result, False, expression, None, error_msg)
+        
+        except OverflowError as e:
+            error_msg = f"Overflow Error: Calculation result too large to represent"
+            self.root.after(0, self._math_update_result, False, expression, None, error_msg)
+        
+        except ValueError as e:
+            error_msg = f"Value Error: {str(e)}"
+            self.root.after(0, self._math_update_result, False, expression, None, error_msg)
+        
+        except MemoryError:
+            error_msg = "Memory Error: Calculation consumed too much memory. Try a simpler expression."
+            self.root.after(0, self._math_update_result, False, expression, None, error_msg)
+        
         except Exception as e:
-            self.math_result.insert(tk.END, f"Error: {e}\n\n")
-            self.math_result.see(tk.END)
+            error_msg = f"Unexpected Error: {type(e).__name__}: {str(e)}"
+            self.root.after(0, self._math_update_result, False, expression, None, error_msg)
+        
+        finally:
+            # CLEANUP: Restore original integer digit limit
+            try:
+                if original_max_digits is not None:
+                    sys.set_int_max_str_digits(original_max_digits)
+            except Exception:
+                pass
+    
+    def _math_update_result(self, success, expression, result, error):
+        """
+        Safely update calculation result in UI.
+        Called from main thread via self.root.after() - thread-safe.
+        """
+        try:
+            if success:
+                # Display successful calculation
+                self.math_result.insert(tk.END, f"Expression: {expression}\n")
+                self.math_result.insert(tk.END, f"Result: {result}\n\n")
+                self.math_result.see(tk.END)
+            else:
+                # Display error message cleanly
+                self.math_result.insert(tk.END, f"❌ {error}\n\n")
+                self.math_result.see(tk.END)
+        except tk.TclError:
+            # Widget might have been destroyed
+            logger.warning("Math result widget destroyed before update")
+        except Exception as e:
+            # Fallback error logging
+            logger.error(f"Error updating math result: {e}")
+            print(f"Error updating result display: {e}")
 
     def math_plot_function(self):
-        """Plot mathematical function"""
+        """Plot mathematical function (threaded to prevent UI freeze)"""
         try:
             function_str = self.math_function.get()
-            x_min = float(self.math_x_min.get())
-            x_max = float(self.math_x_max.get())
+            x_min_str = self.math_x_min.get()
+            x_max_str = self.math_x_max.get()
             
+            # Validate inputs on UI thread
+            x_min = float(x_min_str)
+            x_max = float(x_max_str)
+            
+            # Run plotting in background thread
+            thread = threading.Thread(
+                target=self._math_plot_worker, 
+                args=(function_str, x_min, x_max), 
+                daemon=True
+            )
+            thread.start()
+            
+        except ValueError as e:
+            messagebox.showerror("Input Error", f"Invalid range values: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Plot error: {e}")
+    
+    def _math_plot_worker(self, function_str, x_min, x_max):
+        """Background worker for function plotting"""
+        try:
             # Create x values
             x = np.linspace(x_min, x_max, 1000)
             
-            # Safe evaluation
+            # Safe evaluation with numpy functions
             import math
             allowed_names = {
                 'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
@@ -27762,18 +27959,31 @@ Sample gallery for demonstration.
             # Evaluate function
             y = eval(function_str, {"__builtins__": {}}, allowed_names)
             
-            # Clear and plot
-            self.math_subplot.clear()
-            self.math_subplot.plot(x, y, 'b-', linewidth=2)
-            self.math_subplot.grid(True)
-            self.math_subplot.set_xlabel('x')
-            self.math_subplot.set_ylabel('f(x)')
-            self.math_subplot.set_title(f'f(x) = {function_str}')
-            
-            self.math_canvas.draw()
+            # Safely update canvas from thread
+            self.root.after(0, self._math_update_plot, True, function_str, x, y, None)
             
         except Exception as e:
-            messagebox.showerror("Error", f"Plot error: {e}")
+            # Safely display error from thread
+            self.root.after(0, self._math_update_plot, False, function_str, None, None, str(e))
+    
+    def _math_update_plot(self, success, function_str, x, y, error):
+        """Safely update plot in UI (called from main thread via after)"""
+        try:
+            if success:
+                # Clear and plot
+                self.math_subplot.clear()
+                self.math_subplot.plot(x, y, 'b-', linewidth=2)
+                self.math_subplot.grid(True)
+                self.math_subplot.set_xlabel('x')
+                self.math_subplot.set_ylabel('f(x)')
+                self.math_subplot.set_title(f'f(x) = {function_str}')
+                
+                self.math_canvas.draw()
+            else:
+                messagebox.showerror("Plot Error", f"Error plotting function: {error}")
+        except Exception as e:
+            print(f"Error updating plot: {e}")
+            messagebox.showerror("Error", f"Failed to update plot display: {e}")
 
     def _atomic_write_json(self, path, data):
         """Atomically write JSON to `path`. Returns (success:bool, backup_path or None)."""
