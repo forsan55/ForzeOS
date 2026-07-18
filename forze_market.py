@@ -18,6 +18,8 @@ can be passed as `forze` to allow tighter integration.
 from __future__ import annotations
 import os
 import json
+import csv
+import io
 import subprocess
 import traceback
 import threading
@@ -64,6 +66,595 @@ class App:
 if __name__ == '__main__':
     r = tk.Tk(); r.withdraw(); App(r); r.mainloop()
 """
+
+
+class ShadowGateAuditor:
+    TELEMETRY_TASK_FOLDERS = [
+        r"\Microsoft\Windows\Customer Experience Improvement Program",
+        r"\Microsoft\Windows\Application Experience"
+    ]
+    HOSTS_REDIRECTS = {
+        'telemetry.intel.com': '0.0.0.0',
+        'vortex.data.microsoft.com': '0.0.0.0',
+        'telemetry.amd.com': '0.0.0.0'
+    }
+    FIREWALL_PORTS = '16992,16993,623,624,9998'
+
+    def __init__(self, parent=None, amd_support=True):
+        self.parent = parent
+        self.results = {}
+        self.amd_support = bool(amd_support)
+
+    def _host_redirects(self):
+        redirects = dict(self.HOSTS_REDIRECTS)
+        if not self.amd_support:
+            redirects.pop('telemetry.amd.com', None)
+        return redirects
+
+    def _run_process(self, args, timeout=45):
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, shell=False, timeout=timeout)
+            return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+        except Exception as e:
+            return -1, '', str(e)
+
+    def _windows_available(self):
+        return sys.platform.startswith('win')
+
+    def _has_admin(self):
+        if not self._windows_available():
+            return False
+        try:
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            return False
+
+    def _list_telemetry_tasks(self):
+        tasks = []
+        if not self._windows_available():
+            return tasks
+        for folder in self.TELEMETRY_TASK_FOLDERS:
+            query = (
+                f"Try {{ Get-ScheduledTask -TaskPath '{folder}\\' | "
+                "Select-Object -Property TaskName,TaskPath | ConvertTo-Json -Compress }} "
+                "Catch { Write-Output '[]' }"
+            )
+            rc, out, err = self._run_process(['powershell', '-NoProfile', '-NonInteractive', '-Command', query])
+            if rc != 0 or not out:
+                continue
+            try:
+                data = json.loads(out)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                data = [data]
+            for item in data:
+                try:
+                    path = item.get('TaskPath', '') or ''
+                    name = item.get('TaskName', '') or ''
+                    if path and name:
+                        full = path + name
+                        tasks.append(full)
+                except Exception:
+                    continue
+        return sorted(set(tasks))
+
+    def _disable_telemetry_tasks(self):
+        result = {'found': [], 'disabled': [], 'deleted': [], 'errors': []}
+        if not self._windows_available():
+            result['status'] = 'unsupported'
+            return result
+
+        task_names = self._list_telemetry_tasks()
+        result['found'] = task_names
+        if not task_names:
+            result['status'] = 'none_found'
+            return result
+
+        for task in task_names:
+            rc, out, err = self._run_process(['schtasks', '/Change', '/TN', task, '/Disable'])
+            if rc == 0:
+                result['disabled'].append(task)
+                continue
+            rc2, out2, err2 = self._run_process(['schtasks', '/Delete', '/TN', task, '/F'])
+            if rc2 == 0:
+                result['deleted'].append(task)
+                continue
+            result['errors'].append({'task': task, 'error': err or out or err2 or out2})
+
+        if result['errors']:
+            result['status'] = 'partial'
+        else:
+            result['status'] = 'completed'
+        return result
+
+    def _apply_firewall_rules(self):
+        result = {'created': [], 'errors': []}
+        if not self._windows_available():
+            result['status'] = 'unsupported'
+            return result
+        if not self._has_admin():
+            result['status'] = 'no_admin'
+            return result
+
+        rules = [
+            {'name': 'ForzeOS ShadowGate Privacy Hardening - Inbound TCP', 'dir': 'in', 'protocol': 'TCP'},
+            {'name': 'ForzeOS ShadowGate Privacy Hardening - Outbound TCP', 'dir': 'out', 'protocol': 'TCP'},
+            {'name': 'ForzeOS ShadowGate Privacy Hardening - Inbound UDP', 'dir': 'in', 'protocol': 'UDP'},
+            {'name': 'ForzeOS ShadowGate Privacy Hardening - Outbound UDP', 'dir': 'out', 'protocol': 'UDP'},
+        ]
+
+        for rule in rules:
+            delete_args = [
+                'netsh', 'advfirewall', 'firewall', 'delete', 'rule',
+                f"name={rule['name']}", 'dir=' + rule['dir'], 'protocol=' + rule['protocol']
+            ]
+            self._run_process(delete_args)
+
+            add_args = [
+                'netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                f"name={rule['name']}",
+                'dir=' + rule['dir'],
+                'action=block',
+                'protocol=' + rule['protocol'],
+                'localport=' + self.FIREWALL_PORTS,
+                'remoteip=any',
+                'profile=any',
+                'enable=yes'
+            ]
+            rc, out, err = self._run_process(add_args)
+            if rc == 0:
+                result['created'].append(rule['name'])
+            else:
+                result['errors'].append({'rule': rule['name'], 'error': err or out})
+
+        if result['errors']:
+            result['status'] = 'partial'
+        else:
+            result['status'] = 'completed'
+        return result
+
+    def _update_hosts(self):
+        result = {'added': [], 'existing': [], 'errors': []}
+        if not self._windows_available():
+            result['status'] = 'unsupported'
+            return result
+        if not self._has_admin():
+            result['status'] = 'no_admin'
+            return result
+
+        hosts_path = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'drivers' / 'etc' / 'hosts'
+        if not hosts_path.exists():
+            result['status'] = 'missing_hosts'
+            result['errors'].append('Hosts file not found')
+            return result
+
+        try:
+            existing = set()
+            with hosts_path.open('r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    text = line.strip()
+                    if not text or text.startswith('#'):
+                        continue
+                    parts = text.split()
+                    if len(parts) >= 2:
+                        existing.add(parts[1].lower())
+
+            add_lines = []
+            for host, ip in self._host_redirects().items():
+                if host.lower() in existing:
+                    result['existing'].append(host)
+                else:
+                    add_lines.append(f"{ip} {host}\n")
+                    result['added'].append(host)
+
+            if add_lines:
+                tmp = tempfile.NamedTemporaryFile('w', delete=False, suffix='.tmp', dir=str(hosts_path.parent), encoding='utf-8', newline='\n')
+                try:
+                    with hosts_path.open('r', encoding='utf-8', errors='replace') as old:
+                        tmp.writelines(old.readlines())
+                    tmp.writelines(add_lines)
+                    tmp.close()
+                    try:
+                        os.replace(tmp.name, str(hosts_path))
+                    except Exception as exc_replace:
+                        try:
+                            shutil.copyfile(tmp.name, str(hosts_path))
+                            os.remove(tmp.name)
+                        except Exception as exc_copy:
+                            raise exc_copy from exc_replace
+                except Exception:
+                    try:
+                        tmp.close()
+                    except Exception:
+                        pass
+                    raise   
+
+            result['status'] = 'completed'
+            return result
+            
+        except Exception as exc:
+            result['status'] = 'error'
+            result['errors'].append(str(exc))
+            return result
+
+    def _rollback_firewall_rules(self):
+        result = {'removed': [], 'errors': []}
+        if not self._windows_available():
+            result['status'] = 'unsupported'
+            return result
+        if not self._has_admin():
+            result['status'] = 'no_admin'
+            return result
+
+        rule_names = [
+            'ForzeOS ShadowGate Privacy Hardening - Inbound TCP',
+            'ForzeOS ShadowGate Privacy Hardening - Outbound TCP',
+            'ForzeOS ShadowGate Privacy Hardening - Inbound UDP',
+            'ForzeOS ShadowGate Privacy Hardening - Outbound UDP'
+        ]
+        for rule in rule_names:
+            rc, out, err = self._run_process(['netsh', 'advfirewall', 'firewall', 'delete', 'rule', f'name={rule}'])
+            if rc == 0:
+                result['removed'].append(rule)
+            elif 'No rules match the specified criteria' not in (err or out):
+                result['errors'].append({'rule': rule, 'error': err or out})
+
+        result['status'] = 'completed' if not result['errors'] else 'partial'
+        return result
+
+    def _rollback_hosts(self):
+        result = {'removed': [], 'errors': []}
+        if not self._windows_available():
+            result['status'] = 'unsupported'
+            return result
+        if not self._has_admin():
+            result['status'] = 'no_admin'
+            return result
+
+        hosts_path = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'drivers' / 'etc' / 'hosts'
+        if not hosts_path.exists():
+            result['status'] = 'missing_hosts'
+            result['errors'].append('Hosts file not found')
+            return result
+
+        try:
+            lines = []
+            removed_hosts = set(self._host_redirects().keys())
+            with hosts_path.open('r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith('#'):
+                        lines.append(line)
+                        continue
+                    parts = stripped.split()
+                    if len(parts) >= 2 and parts[1].lower() in removed_hosts:
+                        result['removed'].append(parts[1].lower())
+                        continue
+                    lines.append(line)
+
+            if result['removed']:
+                tmp = tempfile.NamedTemporaryFile('w', delete=False, suffix='.tmp', dir=str(hosts_path.parent), encoding='utf-8', newline='\n')
+                try:
+                    tmp.writelines(lines)
+                    tmp.close()
+                    os.replace(tmp.name, str(hosts_path))
+                except Exception:
+                    try:
+                        tmp.close()
+                    except Exception:
+                        pass
+                    raise
+
+            result['status'] = 'completed'
+            return result
+        except Exception as exc:
+            result['status'] = 'error'
+            result['errors'].append(str(exc))
+            return result
+
+    def _rollback_telemetry_tasks(self):
+        result = {'enabled': [], 'errors': []}
+        if not self._windows_available():
+            result['status'] = 'unsupported'
+            return result
+        if not self._has_admin():
+            result['status'] = 'no_admin'
+            return result
+
+        task_names = self._list_telemetry_tasks()
+        for task in task_names:
+            rc, out, err = self._run_process(['schtasks', '/Change', '/TN', task, '/Enable'])
+            if rc == 0:
+                result['enabled'].append(task)
+            else:
+                result['errors'].append({'task': task, 'error': err or out})
+
+        result['status'] = 'completed' if not result['errors'] else 'partial'
+        return result
+
+    def rollback(self):
+        results = {'admin': self._has_admin()}
+        results['hosts'] = self._rollback_hosts()
+        results['firewall'] = self._rollback_firewall_rules()
+        results['scheduler'] = self._rollback_telemetry_tasks()
+        self._schedule_report(results)
+        return results
+
+    def _rollback_firewall_rules(self):
+        result = {'removed': [], 'errors': []}
+        if not self._windows_available():
+            result['status'] = 'unsupported'
+            return result
+        if not self._has_admin():
+            result['status'] = 'no_admin'
+            return result
+
+        rule_names = [
+            'ForzeOS ShadowGate Privacy Hardening - Inbound TCP',
+            'ForzeOS ShadowGate Privacy Hardening - Outbound TCP',
+            'ForzeOS ShadowGate Privacy Hardening - Inbound UDP',
+            'ForzeOS ShadowGate Privacy Hardening - Outbound UDP'
+        ]
+        for rule in rule_names:
+            rc, out, err = self._run_process(['netsh', 'advfirewall', 'firewall', 'delete', 'rule', f'name={rule}'])
+            if rc == 0:
+                result['removed'].append(rule)
+            elif 'No rules match the specified criteria' not in (err or out):
+                result['errors'].append({'rule': rule, 'error': err or out})
+
+        result['status'] = 'completed' if not result['errors'] else 'partial'
+        return result
+
+    def _rollback_hosts(self):
+        result = {'removed': [], 'errors': []}
+        if not self._windows_available():
+            result['status'] = 'unsupported'
+            return result
+        if not self._has_admin():
+            result['status'] = 'no_admin'
+            return result
+
+        hosts_path = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'drivers' / 'etc' / 'hosts'
+        if not hosts_path.exists():
+            result['status'] = 'missing_hosts'
+            result['errors'].append('Hosts file not found')
+            return result
+
+        try:
+            lines = []
+            removed_hosts = set(self.HOSTS_REDIRECTS.keys())
+            with hosts_path.open('r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith('#'):
+                        lines.append(line)
+                        continue
+                    parts = stripped.split()
+                    if len(parts) >= 2 and parts[1].lower() in removed_hosts:
+                        result['removed'].append(parts[1].lower())
+                        continue
+                    lines.append(line)
+
+            if result['removed']:
+                tmp = tempfile.NamedTemporaryFile('w', delete=False, suffix='.tmp', dir=str(hosts_path.parent), encoding='utf-8', newline='\n')
+                try:
+                    tmp.writelines(lines)
+                    tmp.close()
+                    try:
+                        os.replace(tmp.name, str(hosts_path))
+                    except Exception as exc_replace:
+                        try:
+                            shutil.copyfile(tmp.name, str(hosts_path))
+                            os.remove(tmp.name)
+                        except Exception as exc_copy:
+                            raise exc_copy from exc_replace
+                except Exception:
+                    try:
+                        tmp.close()
+                    except Exception:
+                        pass
+                    raise
+
+            result['status'] = 'completed'
+            return result
+        except Exception as exc:
+            result['status'] = 'error'
+            result['errors'].append(str(exc))
+            return result
+
+    def _rollback_telemetry_tasks(self):
+        result = {'enabled': [], 'errors': []}
+        if not self._windows_available():
+            result['status'] = 'unsupported'
+            return result
+        if not self._has_admin():
+            result['status'] = 'no_admin'
+            return result
+
+        task_names = self._list_telemetry_tasks()
+        for task in task_names:
+            rc, out, err = self._run_process(['schtasks', '/Change', '/TN', task, '/Enable'])
+            if rc == 0:
+                result['enabled'].append(task)
+            else:
+                result['errors'].append({'task': task, 'error': err or out})
+
+        result['status'] = 'completed' if not result['errors'] else 'partial'
+        return result
+
+    def rollback(self):
+        results = {'admin': self._has_admin()}
+        results['hosts'] = self._rollback_hosts()
+        results['firewall'] = self._rollback_firewall_rules()
+        results['scheduler'] = self._rollback_telemetry_tasks()
+        self._schedule_report(results)
+        return results
+
+    def _query_secure_boot(self):
+        if not self._windows_available():
+            return None
+        query = (
+            "Try { $x = Get-CimInstance -Namespace root\\Microsoft\\Windows\\Storage -ClassName MSFT_SecureBoot -ErrorAction Stop; "
+            "if ($null -ne $x) { $x.SecureBootEnabled } else { Write-Output 'UNKNOWN' } } "
+            "Catch { Write-Output 'UNKNOWN' }"
+        )
+        rc, out, _ = self._run_process(['powershell', '-NoProfile', '-NonInteractive', '-Command', query])
+        if rc != 0 or not out:
+            return None
+        text = out.strip().lower()
+        if text == 'true':
+            return True
+        if text == 'false':
+            return False
+        return None
+
+    def _query_tpm(self):
+        if not self._windows_available():
+            return None
+        query = (
+            "Try { $x = Get-CimInstance -Namespace root\\cimv2 -ClassName Win32_Tpm -ErrorAction Stop; "
+            "if ($null -ne $x -and $x.TpmPresent -eq $true) { $x.SpecVersion } else { Write-Output 'NONE' } } "
+            "Catch { Write-Output 'NONE' }"
+        )
+        rc, out, _ = self._run_process(['powershell', '-NoProfile', '-NonInteractive', '-Command', query])
+        if rc != 0 or not out:
+            return None
+        out = out.strip().lower()
+        if out == 'none':
+            return False
+        return '2.0' in out
+
+    def _query_hvci(self):
+        if not self._windows_available():
+            return None
+        query = (
+            "Try { $x = Get-CimInstance -Namespace root\\Microsoft\\Windows\\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction Stop; "
+            "if ($null -ne $x -and $x.SecurityServicesRunning -ne $null) { $x.SecurityServicesRunning } else { Write-Output 'UNKNOWN' } } "
+            "Catch { Write-Output 'UNKNOWN' }"
+        )
+        rc, out, _ = self._run_process(['powershell', '-NoProfile', '-NonInteractive', '-Command', query])
+        if rc != 0 or not out:
+            return None
+        text = out.strip().lower()
+        if text == 'unknown':
+            return None
+        try:
+            value = int(text)
+            return value != 0
+        except Exception:
+            return None
+
+    def _format_bool(self, value):
+        if value is True:
+            return '[✓] AKTİF'
+        if value is False:
+            return '[X] PASİF'
+        return '[!] BİLİNMEYEN'
+
+    def _format_results(self, results):
+        lines = []
+        lines.append('Shadow-Gate Privacy Hardening Auditor Report')
+        lines.append('=' * 54)
+        lines.append(f'Platform: {"Windows" if self._windows_available() else "Unsupported"}')
+        lines.append(f'Administrator: {self._format_bool(results.get("admin"))}')
+        lines.append('')
+        lines.append(f'Secure Boot: {self._format_bool(results.get("secure_boot"))}')
+        lines.append(f'TPM 2.0: {self._format_bool(results.get("tpm_2"))}')
+        lines.append(f'HVCI: {self._format_bool(results.get("hvci"))}')
+        lines.append('')
+        scheduler = results.get('scheduler', {})
+        lines.append('Scheduled Task Hardening:')
+        lines.append(f'  Status: {scheduler.get("status") or "unknown"}')
+        if scheduler.get('found'):
+            lines.append(f'  Found: {len(scheduler.get("found"))} task(s)')
+            for task in scheduler.get('found', []):
+                state = 'disabled' if task in scheduler.get('disabled', []) else ('deleted' if task in scheduler.get('deleted', []) else 'pending')
+                lines.append(f'    - {task} ({state})')
+        if scheduler.get('errors'):
+            lines.append('  Errors:')
+            for err in scheduler.get('errors', []):
+                lines.append(f'    - {err}')
+        lines.append('')
+        firewall = results.get('firewall', {})
+        lines.append('Firewall Hardening:')
+        lines.append(f'  Status: {firewall.get("status") or "unknown"}')
+        if firewall.get('created'):
+            for rule in firewall.get('created', []):
+                lines.append(f'    - {rule}')
+        if firewall.get('errors'):
+            lines.append('  Errors:')
+            for err in firewall.get('errors', []):
+                lines.append(f'    - {err}')
+        lines.append('')
+        hosts = results.get('hosts', {})
+        lines.append('Hosts Sinkhole:')
+        lines.append(f'  Status: {hosts.get("status") or "unknown"}')
+        if hosts.get('added'):
+            for host in hosts.get('added', []):
+                lines.append(f'    - Added: {host}')
+        if hosts.get('existing'):
+            for host in hosts.get('existing', []):
+                lines.append(f'    - Existing: {host}')
+        if hosts.get('errors'):
+            lines.append('  Errors:')
+            for err in hosts.get('errors', []):
+                lines.append(f'    - {err}')
+        lines.append('')
+        lines.append('BIOS Sıkılaştırma Rehberi:')
+        lines.append('  Maksimum donanımsal gizlilik için bilgisayarınızı yeniden başlatıp BIOS ayarlarından')
+        lines.append('  Intel ME / AMD PSP / WAN Radio seçeneklerini kapatabilirsiniz.')
+        lines.append('')
+        lines.append('Not: Bu modül yalnızca denetleyici olarak çalışır; Secure Boot, TPM ve HVCI ayarlarını değiştirmez.')
+        return '\n'.join(lines)
+
+    def _schedule_report(self, results):
+        if self.parent is not None and hasattr(self.parent, 'after'):
+            try:
+                self.parent.after(0, lambda: self.show_report(results))
+                return
+            except Exception:
+                pass
+        self.show_report(results)
+
+    def execute(self):
+        results = {'admin': self._has_admin(), 'secure_boot': None, 'tpm_2': None, 'hvci': None}
+        if not self._windows_available():
+            results['reason'] = 'Only Windows is supported for Shadow-Gate auditing.'
+            self._schedule_report(results)
+            return results
+
+        if not results['admin']:
+            results['admin_note'] = 'Yönetici haklarına sahip değil. Ağ ve hosts düzeltmeleri çalışmayabilir.'
+
+        results['scheduler'] = self._disable_telemetry_tasks()
+        results['firewall'] = self._apply_firewall_rules()
+        results['hosts'] = self._update_hosts()
+        results['secure_boot'] = self._query_secure_boot()
+        results['tpm_2'] = self._query_tpm()
+        results['hvci'] = self._query_hvci()
+        self._schedule_report(results)
+        return results
+
+    def show_report(self, results):
+        try:
+            win = tk.Toplevel(self.parent) if self.parent is not None else tk.Toplevel()
+            win.title('Shadow-Gate Audit Report')
+            win.geometry('760x560')
+            frame = ttk.Frame(win)
+            frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+            text = tk.Text(frame, wrap='word')
+            text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+            try:
+                scrollbar = ttk.Scrollbar(frame, orient='vertical', command=text.yview)
+                scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+                text.configure(yscrollcommand=scrollbar.set)
+            except Exception:
+                pass
+            text.insert('1.0', self._format_results(results))
+            text.configure(state=tk.DISABLED)
+        except Exception:
+            pass
 
 
 class ForzeOSMarket(tk.Toplevel):
@@ -167,6 +758,8 @@ class ForzeOSMarket(tk.Toplevel):
         search_entry.bind('<KeyRelease>', lambda e: self.refresh_app_list())
 
         ttk.Button(top, text='Refresh', command=self.refresh_app_list).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text='Shadow-Gate Audit', command=self.run_shadowgate_audit).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text='Rollback ShadowGate', command=self.run_shadowgate_rollback).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text='Settings', command=self._open_settings).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text='New App', command=self._new_app_wizard).pack(side=tk.LEFT, padx=4)
         # Run as Tool: open recognized tool (organize_assets) in editor and run
@@ -289,10 +882,15 @@ class ForzeOSMarket(tk.Toplevel):
         except Exception as e:
             logger.exception('forze_market.load_market_data failed: %s', e)
             self.market_data = {}
-        # ensure template key exists
+        # ensure template and ShadowGate configuration keys exist
         try:
             if 'template' not in self.market_data:
                 self.market_data.setdefault('template', MARKET_DEFAULT_TEMPLATE)
+            if 'shadowgate' not in self.market_data or not isinstance(self.market_data.get('shadowgate'), dict):
+                self.market_data['shadowgate'] = {'enabled': True, 'amd_support': True}
+            else:
+                self.market_data['shadowgate'].setdefault('enabled', True)
+                self.market_data['shadowgate'].setdefault('amd_support', True)
         except Exception:
             pass
 
@@ -357,6 +955,22 @@ class ForzeOSMarket(tk.Toplevel):
                 org_path = self.base_dir / 'organize_assets.py'
             if org_path.exists():
                 apps.insert(0, {'name': 'organize_assets', 'path': str(org_path), 'icon': None, 'desc': 'Project modularizer / asset manager'})
+        except Exception:
+            pass
+
+        # Built-in ShadowGate audit app appears near organize_assets when enabled
+        try:
+            if self.market_data.get('shadowgate', {}).get('enabled', True):
+                shadowgate_entry = {
+                    'name': 'ShadowGate Audit',
+                    'path': '__shadowgate_audit__',
+                    'icon': None,
+                    'desc': 'Privacy hardening auditor for telemetry, firewall and firmware checks'
+                }
+                if apps and apps[0].get('name') == 'organize_assets':
+                    apps.insert(1, shadowgate_entry)
+                else:
+                    apps.insert(0, shadowgate_entry)
         except Exception:
             pass
 
@@ -481,6 +1095,9 @@ class ForzeOSMarket(tk.Toplevel):
                         return
                 except Exception:
                     pass
+            if path == '__shadowgate_audit__':
+                return self.run_shadowgate_audit()
+
             # If this was launched inside ForzeOS instance, prefer using its opener
             if self.forze and hasattr(self.forze, 'open_script'):
                 try:
@@ -820,6 +1437,21 @@ class ForzeOSMarket(tk.Toplevel):
         except Exception:
             pass
 
+    def run_shadowgate_audit(self):
+        try:
+            amd_support = self.market_data.get('shadowgate', {}).get('amd_support', True)
+            auditor = ShadowGateAuditor(parent=self, amd_support=amd_support)
+            threading.Thread(target=auditor.execute, daemon=True).start()
+        except Exception as e:
+            messagebox.showerror('Shadow-Gate Audit', f'Başlatılamadı: {e}')
+
+    def run_shadowgate_rollback(self):
+        try:
+            auditor = ShadowGateAuditor(parent=self, amd_support=self.market_data.get('shadowgate', {}).get('amd_support', True))
+            threading.Thread(target=auditor.rollback, daemon=True).start()
+        except Exception as e:
+            messagebox.showerror('Shadow-Gate Rollback', f'Başlatılamadı: {e}')
+
     def remove_app(self, path, name):
         try:
             if not messagebox.askyesno('Remove', f'Remove {name}? This will delete the file.'):
@@ -839,8 +1471,6 @@ class ForzeOSMarket(tk.Toplevel):
             messagebox.showerror('Error', f'Could not remove: {e}')
 
     # ---------------- helper dialogs ----------------
-    def _open_settings(self):
-        messagebox.showinfo('Settings', 'No configurable settings yet.')
 
     def _new_app_wizard(self):
         # Simple wizard: ask name, create starter template in dev editor
@@ -858,16 +1488,32 @@ class ForzeOSMarket(tk.Toplevel):
         self.dev_filename = None
 
     def _open_settings(self):
-        """Open simple settings dialog to edit the new-app template."""
+        """Open settings dialog to edit market template and ShadowGate configuration."""
         try:
             win = tk.Toplevel(self)
-            win.title('Market Template')
-            win.geometry('700x480')
-            txt = tk.Text(win, wrap='none')
-            txt.pack(fill='both', expand=True)
+            win.title('Market Settings')
+            win.geometry('760x560')
+
+            container = ttk.Frame(win)
+            container.pack(fill='both', expand=True, padx=8, pady=8)
+
+            ttk.Label(container, text='Market Template', font=('Segoe UI', 11, 'bold')).pack(anchor='w', pady=(0, 6))
+            txt = tk.Text(container, wrap='none', height=14)
+            txt.pack(fill='both', expand=False)
             current = (self.market_data.get('template') if hasattr(self, 'market_data') else None) or MARKET_DEFAULT_TEMPLATE
             txt.delete('1.0', tk.END)
             txt.insert('1.0', current)
+
+            shadowgate = self.market_data.get('shadowgate', {})
+            enabled_var = tk.BooleanVar(value=shadowgate.get('enabled', True))
+            amd_support_var = tk.BooleanVar(value=shadowgate.get('amd_support', True))
+
+            chk_frame = ttk.Frame(container)
+            chk_frame.pack(fill='x', pady=8)
+            ttk.Checkbutton(chk_frame, text='Enable built-in ShadowGate Audit app', variable=enabled_var).pack(anchor='w', pady=2)
+            ttk.Checkbutton(chk_frame, text='Enable AMD telemetry sinkhole support', variable=amd_support_var).pack(anchor='w', pady=2)
+
+            ttk.Label(container, text='If AMD telemetry support is disabled, telemetry.amd.com will not be altered.', wraplength=720).pack(anchor='w', pady=(0,6))
 
             def _save():
                 try:
@@ -875,17 +1521,22 @@ class ForzeOSMarket(tk.Toplevel):
                     if not hasattr(self, 'market_data'):
                         self.market_data = {}
                     self.market_data['template'] = val
+                    self.market_data.setdefault('shadowgate', {})['enabled'] = enabled_var.get()
+                    self.market_data.setdefault('shadowgate', {})['amd_support'] = amd_support_var.get()
                     try:
                         self.save_market_data()
                     except Exception:
                         pass
+                    self.refresh_app_list()
                     win.destroy()
-                    self._print_output('[settings] Template saved\n')
+                    self._print_output('[settings] Market settings saved\n')
                 except Exception as e:
-                    messagebox.showerror('Error', f'Could not save template: {e}')
+                    messagebox.showerror('Error', f'Could not save settings: {e}')
 
-            b = ttk.Button(win, text='Save Template', command=_save)
-            b.pack(pady=6)
+            button_frame = ttk.Frame(container)
+            button_frame.pack(fill='x', pady=8)
+            ttk.Button(button_frame, text='Save Settings', command=_save).pack(side='left', padx=2)
+            ttk.Button(button_frame, text='Run ShadowGate Rollback', command=self.run_shadowgate_rollback).pack(side='left', padx=2)
         except Exception as e:
             messagebox.showerror('Error', f'Failed to open settings: {e}')
 
@@ -1144,6 +1795,7 @@ class ForzeMarket:
         tk.Button(tool_frame, text='Open in Host Editor', command=self.open_in_host_editor).pack(side='left', padx=4)
         tk.Button(tool_frame, text='Save', command=self.save).pack(side='left', padx=4)
         tk.Button(tool_frame, text='Run', command=self.run_editor).pack(side='left', padx=4)
+        tk.Button(tool_frame, text='Shadow-Gate Audit', command=self.run_shadowgate_audit).pack(side='left', padx=4)
         tk.Button(tool_frame, text='Launch', command=self.launch_app).pack(side='left', padx=4)
         tk.Button(tool_frame, text='Remove', command=self.remove_app).pack(side='left', padx=4)
         try:
@@ -1388,6 +2040,13 @@ class ForzeMarket:
                 pass
         except Exception as e:
             messagebox.showerror('Install failed', str(e))
+
+    def run_shadowgate_audit(self):
+        try:
+            auditor = ShadowGateAuditor(parent=self.win)
+            threading.Thread(target=auditor.execute, daemon=True).start()
+        except Exception as e:
+            messagebox.showerror('Shadow-Gate Audit', f'Başlatılamadı: {e}')
 
     def run_as_tool(self):
         if not self.current_path:
