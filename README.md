@@ -15,7 +15,7 @@ PASSWORD - Forze esp32
 
 ---
 
-## 🛠️ Installation & Setup
+## 🛠️ Installation & Setup (Linux)
 Follow these steps to get ForzeOS running on your system:
 
 1. **Install Dependencies:**
@@ -111,7 +111,7 @@ ForzeOS is more than just a standard Python project; it is a modular architectur
 | **AI Engine** | N-gram Vectorization |
 | **Mobile Port** | Termux + XFCE + VNC |
 
-## 💡 Git clone and use 
+## 💡 Git clone and use (Windows)
 
 ```bash
 # Clone the repository
