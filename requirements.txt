@@ -4,6 +4,7 @@ pywebview
 psutil
 requests
 pygame
+pygame-ce 
 python-vlc
 moviepy
 pymupdf
