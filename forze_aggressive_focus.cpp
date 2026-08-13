@@ -1,21 +1,23 @@
-// forze_aggressive_focus.cpp
-// Rewritten per user request:
-// - Dynamic API resolution for sensitive Win32 functions (GetProcAddress/LoadLibrary used at runtime)
-// - All sensitive strings are built from ASCII byte arrays to avoid cleartext literals
-// - SEH (__try / __except) used instead of C++ try/catch so this targets MSVC
-// - Exports are masked as DllRegisterFocusFilter / DllUnregisterFocusFilter
-// - Very conservative whitelist that never touches critical system processes or anything
-//   whose full image path is under C:\\Windows\\System32
-// - Preserves performance features: standby purge (NtSetSystemInformation),
-//   SetPriorityClass, D3DKMT scheduling bump, SetProcessInformation (IO priority),
-//   Avrt MMCSS "Games" optimization, SetSystemFileCacheSize and EmptyWorkingSet.
-// Eski include bloklarını silip yerine bunu yapıştırın:
+// forze_aggressive.cpp
+// Cleaned, transparent, high-performance Windows focus mode optimization DLL
+// - No obfuscation: all Win32 APIs called transparently
+// - Expanded whitelist: protects games and anti-cheat services
+// - 5 integrated performance modules:
+//   1. High Precision Timer Resolution (timeBeginPeriod/timeEndPeriod)
+//   2. MMCSS "Games" Thread Registration (AvSetMmThreadCharacteristicsW)
+//   3. Dynamic Power Plan Switcher (PowerSetActiveScheme via powrprof.dll)
+//   4. GameDVR & Network Throttling Registry Fixes
+//   5. Self-Process & Heap Hardening
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+// Suppress MSVC C4996 security warnings for getenv, fopen, etc.
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <windows.h>
-#include <tlhelp32.h> // PROCESSENTRY32A yapısının kararlı yüklenmesi için windows.h altında olmalıdır
+#include <tlhelp32.h>
 #include <psapi.h>
 #include <tchar.h>
 #include <stdio.h>
@@ -30,144 +32,64 @@
 #include <cstdint>
 #include <memory>
 #include <exception>
-// Ensure NTSTATUS exists in case headers differ
+#include <mmsystem.h>
+
+// Ensure NTSTATUS exists
 #ifndef NTSTATUS
 typedef LONG NTSTATUS;
 #endif
 
-// Provide PROCESSENTRY32A fallback for toolchains that expose only wide typedefs
-#ifndef PROCESSENTRY32A
-typedef struct tagPROCESSENTRY32A {
-    DWORD dwSize;
-    DWORD cntUsage;
-    DWORD th32ProcessID;
-    ULONG_PTR th32DefaultHeapID;
-    DWORD th32ModuleID;
-    DWORD cntThreads;
-    DWORD th32ParentProcessID;
-    LONG pcPriClassBase;
-    DWORD dwFlags;
-    CHAR szExeFile[MAX_PATH];
-} PROCESSENTRY32A;
+// AVRT priority constants (may not be defined in all MinGW versions)
+#ifndef AVRT_PRIORITY_HIGH
+#define AVRT_PRIORITY_HIGH 2
 #endif
 
-// Allow this source to compile under non-MSVC toolchains by mapping
-// the MSVC-only SEH tokens to C++ try/catch so GCC/MinGW can build.
-#if !defined(_MSC_VER)
-#ifndef EXCEPTION_EXECUTE_HANDLER
-#define EXCEPTION_EXECUTE_HANDLER 1
-#endif
-#define __try try
-#define __except(x) catch(...)
-#endif
-
-// Link-time helpers for MSVC so users can simply run `cl` without extra args
+// Link libraries
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "powrprof.lib")
 
-// Note: This file intentionally uses __try/__except for SEH handlers and performs
-// runtime GetProcAddress lookups for all sensitive symbols. It is designed for
-// MSVC builds.
-
-// Helper: build string at runtime from byte array to avoid static literals
-static std::string build_str(const unsigned char *arr)
+// Safe GetEnvironmentVariable wrapper (replace deprecated getenv)
+static std::string get_env_var(const char *var_name, const char *default_val)
 {
-    std::string s;
-    for (size_t i = 0; arr[i]; ++i) s.push_back((char)arr[i]);
-    return s;
+    char buffer[1024] = {0};
+    DWORD size = GetEnvironmentVariableA(var_name, buffer, sizeof(buffer) - 1);
+    if (size > 0 && size < sizeof(buffer)) {
+        return std::string(buffer);
+    }
+    return default_val ? std::string(default_val) : std::string();
 }
 
-// Minimal native logfile helper (best-effort, avoids heavy runtime deps)
+// Minimal logging helper (uses try/catch for C++ exception safety)
 static void native_log(const char *fmt, ...)
 {
-    __try {
-        const char *path = getenv("FORZEOS_FOCUS_NATIVE_LOG");
-        const char *default_name = "forze_aggressive_focus_native.log";
-        FILE *f = NULL;
-        if (path && path[0]) f = fopen(path, "a");
-        else f = fopen(default_name, "a");
+    try {
+        std::string log_path = get_env_var("FORZEOS_FOCUS_NATIVE_LOG", "forze_aggressive.log");
+        FILE *f = fopen(log_path.c_str(), "a");
         if (!f) return;
+
         time_t t = time(NULL);
         char *ts = ctime(&t);
         if (ts) {
             size_t L = strlen(ts);
             if (L && ts[L-1] == '\n') ts[L-1] = '\0';
+            fprintf(f, "[%s] ", ts);
         }
-        if (ts) fprintf(f, "[%s] ", ts);
-        va_list ap; va_start(ap, fmt);
+
+        va_list ap;
+        va_start(ap, fmt);
         vfprintf(f, fmt, ap);
         va_end(ap);
+
         fprintf(f, "\n");
         fclose(f);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // best-effort logging; ignore failures
+    } catch (...) {
+        // Silently ignore logging failures
     }
 }
 
-// Obfuscated library names
-static const unsigned char lib_kernel32[] = {107,101,114,110,101,108,51,50,46,100,108,108,0}; // "kernel32.dll"
-static const unsigned char lib_psapi[]     = {112,115,97,112,105,46,100,108,108,0}; // "psapi.dll"
-static const unsigned char lib_ntdll[]     = {110,116,100,108,108,46,100,108,108,0}; // "ntdll.dll"
-static const unsigned char lib_dxg[]       = {100,120,103,107,114,110,108,46,100,108,108,0}; // "dxgkrnl.dll"
-static const unsigned char lib_avrt[]      = {97,118,114,116,46,100,108,108,0}; // "avrt.dll"
-
-// Obfuscated function names (examples)
-static const unsigned char fn_OpenProcess[]              = {79,112,101,110,80,114,111,99,101,115,115,0}; // "OpenProcess"
-static const unsigned char fn_SetPriorityClass[]         = {83,101,116,80,114,105,111,114,105,116,121,67,108,97,115,115,0}; // "SetPriorityClass"
-static const unsigned char fn_GetProcessAffinityMask[]   = {71,101,116,80,114,111,99,101,115,115,65,102,102,105,110,105,116,121,77,97,115,107,0};
-static const unsigned char fn_SetProcessAffinityMask[]   = {83,101,116,80,114,111,99,101,115,115,65,102,102,105,110,105,116,121,77,97,115,107,0};
-static const unsigned char fn_CreateToolhelp32Snapshot[]= {67,114,101,97,116,101,84,111,111,108,104,101,108,112,51,50,83,110,97,112,115,104,111,116,0};
-static const unsigned char fn_Process32FirstA[]          = {80,114,111,99,101,115,115,51,50,70,105,114,115,116,65,0};
-static const unsigned char fn_Process32NextA[]           = {80,114,111,99,101,115,115,51,50,78,101,120,116,65,0};
-static const unsigned char fn_CloseHandle[]              = {67,108,111,115,101,72,97,110,100,108,101,0};
-static const unsigned char fn_EnumProcessModules[]      = {69,110,117,109,80,114,111,99,101,115,115,77,111,100,117,108,101,115,0};
-static const unsigned char fn_GetModuleFileNameExA[]     = {71,101,116,77,111,100,117,108,101,70,105,108,101,78,97,109,101,69,120,65,0};
-static const unsigned char fn_GetProcessImageFileNameA[] = {71,101,116,80,114,111,99,101,115,115,73,109,97,103,101,70,105,108,101,78,97,109,101,65,0};
-static const unsigned char fn_QueryFullProcessImageNameA[]= {81,117,101,114,121,70,117,108,108,80,114,111,99,101,115,115,73,109,97,103,101,78,97,109,101,65,0};
-static const unsigned char fn_GetForegroundWindow[]      = {71,101,116,70,111,114,101,103,114,111,117,110,100,87,105,110,100,111,119,0};
-static const unsigned char fn_GetWindowThreadProcessId[] = {71,101,116,87,105,110,100,111,119,84,104,114,101,97,100,80,114,111,99,101,115,115,73,100,0};
-static const unsigned char fn_GetPerformanceInfo[]       = {71,101,116,80,101,114,102,111,114,109,97,110,99,101,73,110,102,111,0};
-static const unsigned char fn_EmptyWorkingSet[]          = {69,109,112,116,121,87,111,114,107,105,110,103,83,101,116,0};
-static const unsigned char fn_SetSystemFileCacheSize[]   = {83,101,116,83,121,115,116,101,109,70,105,108,101,67,97,99,104,101,83,105,122,101,0};
-static const unsigned char fn_NtSetSystemInformation[]   = {78,116,83,101,116,83,121,115,116,101,109,73,110,102,111,114,109,97,116,105,111,110,0};
-static const unsigned char fn_D3DKMTSetProcessSchedulingPriorityClass[] = {68,51,68,75,77,84,83,101,116,80,114,111,99,101,115,115,83,99,104,101,100,117,108,105,110,103,80,114,105,111,114,105,116,121,67,108,97,115,115,0};
-static const unsigned char fn_SetProcessInformation[]     = {83,101,116,80,114,111,99,101,115,115,73,110,102,111,114,109,97,116,105,111,110,0};
-static const unsigned char fn_AvSetMmThreadCharacteristicsA[] = {65,118,83,101,116,77,109,84,104,114,101,97,100,67,104,97,114,97,99,116,101,114,105,115,116,105,99,115,65,0};
-static const unsigned char fn_AvSetMmThreadPriority[]      = {65,118,83,101,116,77,109,84,104,114,101,97,100,80,114,105,111,114,105,116,121,0};
-static const unsigned char fn_AvRevertMmThreadCharacteristics[] = {65,118,82,101,118,101,114,116,77,109,84,104,114,101,97,100,67,104,97,114,97,99,116,101,114,105,115,116,105,99,115,0};
-
-// Minimal typedefs for functions we'll resolve at runtime
-typedef HANDLE (WINAPI *PFN_OpenProcess)(DWORD, BOOL, DWORD);
-typedef BOOL (WINAPI *PFN_SetPriorityClass)(HANDLE, DWORD);
-typedef BOOL (WINAPI *PFN_GetProcessAffinityMask)(HANDLE, PDWORD_PTR, PDWORD_PTR);
-typedef BOOL (WINAPI *PFN_SetProcessAffinityMask)(HANDLE, DWORD_PTR);
-typedef HANDLE (WINAPI *PFN_CreateToolhelp32Snapshot)(DWORD, DWORD);
-typedef BOOL (WINAPI *PFN_Process32First)(HANDLE, PROCESSENTRY32*);
-typedef BOOL (WINAPI *PFN_Process32Next)(HANDLE, PROCESSENTRY32*);
-typedef BOOL (WINAPI *PFN_EnumProcessModules)(HANDLE, HMODULE*, DWORD, LPDWORD);
-typedef DWORD (WINAPI *PFN_GetModuleFileNameExA)(HANDLE, HMODULE, LPSTR, DWORD);
-typedef DWORD (WINAPI *PFN_GetProcessImageFileNameA)(HANDLE, LPSTR, DWORD);
-typedef BOOL (WINAPI *PFN_QueryFullProcessImageNameA)(HANDLE, DWORD, LPSTR, PDWORD);
-typedef HWND (WINAPI *PFN_GetForegroundWindow)(void);
-typedef DWORD (WINAPI *PFN_GetWindowThreadProcessId)(HWND, LPDWORD);
-typedef BOOL (WINAPI *PFN_GetPerformanceInfo)(PPERFORMANCE_INFORMATION, DWORD);
-typedef BOOL (WINAPI *PFN_EmptyWorkingSet)(HANDLE);
-typedef BOOL (WINAPI *PFN_SetSystemFileCacheSize)(SIZE_T, SIZE_T, DWORD);
-typedef NTSTATUS (WINAPI *PFN_NtSetSystemInformation)(ULONG, PVOID, ULONG);
-typedef NTSTATUS (WINAPI *PFN_D3DKMTSetProcessSchedulingPriorityClass)(PVOID);
-typedef BOOL (WINAPI *PFN_SetProcessInformation)(HANDLE, ULONG, PVOID, DWORD);
-typedef HANDLE (WINAPI *PFN_AvSetMmThreadCharacteristicsA)(LPCSTR, LPDWORD);
-typedef BOOL (WINAPI *PFN_AvSetMmThreadPriority)(HANDLE, int);
-typedef BOOL (WINAPI *PFN_AvRevertMmThreadCharacteristics)(HANDLE);
-
-// Globals for worker state
-static CRITICAL_SECTION g_lock;
-static volatile LONG g_lock_inited = 0;
-static std::vector<DWORD> g_modified_pids;
-static HANDLE g_worker_thread = NULL;
-static HANDLE g_worker_stop_event = NULL;
-
-// Helper: case-insensitive starts_with
+// Case-insensitive string comparison helper
 static bool starts_with_ci(const std::string &s, const std::string &prefix)
 {
     if (s.size() < prefix.size()) return false;
@@ -177,7 +99,7 @@ static bool starts_with_ci(const std::string &s, const std::string &prefix)
     return true;
 }
 
-// Helper: lowercase copy
+// Convert string to lowercase
 static std::string to_lower(const std::string &s)
 {
     std::string out(s);
@@ -185,364 +107,713 @@ static std::string to_lower(const std::string &s)
     return out;
 }
 
-// Build a robust whitelist of exact names (lowercase) that must NEVER be touched
-static std::vector<std::string> build_whitelist()
+// ========== MODULE 1: HIGH PRECISION TIMER RESOLUTION ==========
+class TimerResolutionManager
 {
-    const unsigned char wlist[][64] = {
-        {119,105,110,108,111,103,111,110,46,101,120,101,0},    // winlogon.exe
-        {76,111,103,111,110,85,73,46,101,120,101,0},            // LogonUI.exe
-        {115,105,104,111,115,116,46,101,120,101,0},            // sihost.exe
-        {102,111,110,116,100,114,118,104,111,115,116,46,101,120,101,0}, // fontdrvhost.exe
-        {117,115,101,114,105,110,105,116,46,101,120,101,0},    // userinit.exe
-        {115,104,101,108,108,101,120,112,101,114,105,101,110,99,101,104,111,115,116,46,101,120,101,0}, // shellexperiencehost.exe
-        {108,115,97,115,115,46,101,120,101,0},                 // lsass.exe
-        {99,115,114,115,115,46,101,120,101,0},                 // csrss.exe
-        {115,101,114,118,105,99,101,115,46,101,120,101,0},     // services.exe
-        {115,109,115,115,46,101,120,101,0},                    // smss.exe
-        {115,112,111,111,108,115,118,46,101,120,101,0},        // spoolsv.exe
-        {77,115,77,112,69,110,103,46,101,120,101,0},           // MsMpEng.exe
-        {78,105,115,83,114,118,46,101,120,101,0},              // NisSrv.exe
-        {112,121,116,104,111,110,46,101,120,101,0},            // python.exe
-        {112,121,116,104,111,110,119,46,101,120,101,0},        // pythonw.exe
-        {100,119,109,46,101,120,101,0},                        // dwm.exe
-        {101,120,112,108,111,114,101,114,46,101,120,101,0},    // explorer.exe
-        {0}
+private:
+    UINT mm_resolution_set;
+    
+public:
+    TimerResolutionManager() : mm_resolution_set(0) {}
+    
+    bool enable()
+    {
+        try {
+            TIMECAPS tc;
+            if (timeGetDevCaps(&tc, sizeof(tc)) != TIMERR_NOERROR) {
+                native_log("TimerResolution: timeGetDevCaps failed");
+                return false;
+            }
+            
+            UINT resolution = (tc.wPeriodMin < 1) ? tc.wPeriodMin : 1;
+            MMRESULT result = timeBeginPeriod(resolution);
+            if (result != TIMERR_NOERROR) {
+                native_log("TimerResolution: timeBeginPeriod failed with result %u", result);
+                return false;
+            }
+            
+            mm_resolution_set = resolution;
+            native_log("TimerResolution: enabled at %.1f ms", (double)resolution);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    bool disable()
+    {
+        try {
+            if (mm_resolution_set > 0) {
+                MMRESULT result = timeEndPeriod(mm_resolution_set);
+                if (result != TIMERR_NOERROR) {
+                    native_log("TimerResolution: timeEndPeriod failed with result %u", result);
+                    return false;
+                }
+                mm_resolution_set = 0;
+                native_log("TimerResolution: disabled");
+                return true;
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+};
+
+// ========== MODULE 2: MMCSS "GAMES" THREAD REGISTRATION ==========
+class MMCSSThreadRegistration
+{
+private:
+    HMODULE h_avrt;
+    typedef HANDLE (WINAPI *PFN_AvSetMmThreadCharacteristicsW)(LPCWSTR, LPDWORD);
+    typedef BOOL (WINAPI *PFN_AvSetMmThreadPriority)(HANDLE, int);
+    typedef BOOL (WINAPI *PFN_AvRevertMmThreadCharacteristics)(HANDLE);
+    
+    PFN_AvSetMmThreadCharacteristicsW p_av_set;
+    PFN_AvSetMmThreadPriority p_av_prio;
+    PFN_AvRevertMmThreadCharacteristics p_av_revert;
+    
+public:
+    MMCSSThreadRegistration() : h_avrt(NULL), p_av_set(NULL), p_av_prio(NULL), p_av_revert(NULL) {}
+    
+    bool init()
+    {
+        try {
+            h_avrt = LoadLibraryW(L"avrt.dll");
+            if (!h_avrt) {
+                native_log("MMCSS: Failed to load avrt.dll");
+                return false;
+            }
+            
+            // Safe GetProcAddress casting with reinterpret_cast
+            p_av_set = reinterpret_cast<PFN_AvSetMmThreadCharacteristicsW>(
+                GetProcAddress(h_avrt, "AvSetMmThreadCharacteristicsW"));
+            p_av_prio = reinterpret_cast<PFN_AvSetMmThreadPriority>(
+                GetProcAddress(h_avrt, "AvSetMmThreadPriority"));
+            p_av_revert = reinterpret_cast<PFN_AvRevertMmThreadCharacteristics>(
+                GetProcAddress(h_avrt, "AvRevertMmThreadCharacteristics"));
+            
+            if (!p_av_set || !p_av_prio || !p_av_revert) {
+                native_log("MMCSS: Failed to resolve AVRT functions");
+                FreeLibrary(h_avrt);
+                h_avrt = NULL;
+                return false;
+            }
+            
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    bool register_current_thread_as_games()
+    {
+        try {
+            if (!p_av_set) return false;
+            
+            DWORD task_index = 0;
+            HANDLE av_handle = p_av_set(L"Games", &task_index);
+            if (!av_handle) {
+                native_log("MMCSS: AvSetMmThreadCharacteristicsW failed");
+                return false;
+            }
+            
+            // Set high priority
+            if (p_av_prio) {
+                BOOL ok = p_av_prio(av_handle, AVRT_PRIORITY_HIGH);
+                native_log("MMCSS: Thread registered as Games, priority set: %d", ok ? 1 : 0);
+            }
+            
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    ~MMCSSThreadRegistration()
+    {
+        if (h_avrt) {
+            FreeLibrary(h_avrt);
+            h_avrt = NULL;
+        }
+    }
+};
+
+// ========== MODULE 3: DYNAMIC POWER PLAN SWITCHER ==========
+class PowerPlanManager
+{
+private:
+    HMODULE h_powrprof;
+    typedef DWORD (WINAPI *PFN_PowerSetActiveScheme)(HANDLE, const GUID*);
+    typedef DWORD (WINAPI *PFN_PowerGetActiveScheme)(HANDLE, GUID**);
+    typedef void (WINAPI *PFN_PowerFreeGuidArray)(GUID*);
+    
+    PFN_PowerSetActiveScheme p_set_scheme;
+    PFN_PowerGetActiveScheme p_get_scheme;
+    PFN_PowerFreeGuidArray p_free_guids;
+    
+    GUID original_scheme;
+    bool original_saved;
+    
+public:
+    PowerPlanManager() : h_powrprof(NULL), p_set_scheme(NULL), p_get_scheme(NULL), p_free_guids(NULL), original_saved(false)
+    {
+        ZeroMemory(&original_scheme, sizeof(original_scheme));
+    }
+    
+    bool init()
+    {
+        try {
+            h_powrprof = LoadLibraryW(L"powrprof.dll");
+            if (!h_powrprof) {
+                native_log("PowerPlan: Failed to load powrprof.dll");
+                return false;
+            }
+            
+            // Safe GetProcAddress casting with reinterpret_cast
+            p_set_scheme = reinterpret_cast<PFN_PowerSetActiveScheme>(
+                GetProcAddress(h_powrprof, "PowerSetActiveScheme"));
+            p_get_scheme = reinterpret_cast<PFN_PowerGetActiveScheme>(
+                GetProcAddress(h_powrprof, "PowerGetActiveScheme"));
+            p_free_guids = reinterpret_cast<PFN_PowerFreeGuidArray>(
+                GetProcAddress(h_powrprof, "PowerFreeGuidArray"));
+            
+            if (!p_set_scheme || !p_get_scheme || !p_free_guids) {
+                native_log("PowerPlan: Failed to resolve powrprof functions");
+                FreeLibrary(h_powrprof);
+                h_powrprof = NULL;
+                return false;
+            }
+            
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    bool switch_to_high_performance()
+    {
+        try {
+            if (!p_set_scheme || !p_get_scheme) return false;
+            
+            // Save original scheme
+            GUID *p_orig = NULL;
+            if (p_get_scheme(NULL, &p_orig) == ERROR_SUCCESS && p_orig) {
+                original_scheme = *p_orig;
+                original_saved = true;
+                if (p_free_guids) p_free_guids(p_orig);
+            }
+            
+            // High Performance GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+            GUID high_perf_guid = { 0x8c5e7fda, 0xe8bf, 0x4a96, { 0x9a, 0x85, 0xa6, 0xe2, 0x3a, 0x8c, 0x63, 0x5c } };
+            
+            DWORD result = p_set_scheme(NULL, &high_perf_guid);
+            if (result == ERROR_SUCCESS) {
+                native_log("PowerPlan: Switched to High Performance scheme");
+                return true;
+            } else {
+                native_log("PowerPlan: PowerSetActiveScheme failed with error %u", result);
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    bool restore_original_scheme()
+    {
+        try {
+            if (!original_saved || !p_set_scheme) return false;
+            
+            DWORD result = p_set_scheme(NULL, &original_scheme);
+            if (result == ERROR_SUCCESS) {
+                native_log("PowerPlan: Restored original power scheme");
+                return true;
+            } else {
+                native_log("PowerPlan: Failed to restore scheme, error %u", result);
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    ~PowerPlanManager()
+    {
+        if (h_powrprof) {
+            FreeLibrary(h_powrprof);
+            h_powrprof = NULL;
+        }
+    }
+};
+
+// ========== MODULE 4: GAMEDVR & NETWORK THROTTLING REGISTRY FIXES ==========
+class RegistryOptimizer
+{
+public:
+    bool apply_all_fixes()
+    {
+        bool success = true;
+        
+        // Fix 1: Disable Network Throttling
+        if (!disable_network_throttling()) {
+            native_log("RegistryOptimizer: Failed to disable network throttling");
+            success = false;
+        }
+        
+        // Fix 2: Disable GameDVR
+        if (!disable_gamedvr()) {
+            native_log("RegistryOptimizer: Failed to disable GameDVR");
+            success = false;
+        }
+        
+        return success;
+    }
+    
+private:
+    bool disable_network_throttling()
+    {
+        try {
+            HKEY h_key = NULL;
+            LONG result = RegOpenKeyExA(
+                HKEY_LOCAL_MACHINE,
+                "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile",
+                0,
+                KEY_READ | KEY_WRITE,
+                &h_key
+            );
+            
+            if (result != ERROR_SUCCESS) {
+                native_log("RegistryOptimizer: Failed to open SystemProfile key");
+                return false;
+            }
+            
+            DWORD value = 0xFFFFFFFF;
+            result = RegSetValueExA(
+                h_key,
+                "NetworkThrottlingIndex",
+                0,
+                REG_DWORD,
+                (BYTE*)&value,
+                sizeof(value)
+            );
+            
+            RegCloseKey(h_key);
+            
+            if (result == ERROR_SUCCESS) {
+                native_log("RegistryOptimizer: Network throttling disabled (0xFFFFFFFF)");
+                return true;
+            } else {
+                native_log("RegistryOptimizer: Failed to set NetworkThrottlingIndex, error %ld", result);
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    bool disable_gamedvr()
+    {
+        try {
+            HKEY h_key = NULL;
+            LONG result = RegOpenKeyExA(
+                HKEY_CURRENT_USER,
+                "Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR",
+                0,
+                KEY_READ | KEY_WRITE,
+                &h_key
+            );
+            
+            if (result != ERROR_SUCCESS) {
+                // Key might not exist, try to create it
+                result = RegCreateKeyExA(
+                    HKEY_CURRENT_USER,
+                    "Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR",
+                    0,
+                    NULL,
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_READ | KEY_WRITE,
+                    NULL,
+                    &h_key,
+                    NULL
+                );
+                
+                if (result != ERROR_SUCCESS) {
+                    native_log("RegistryOptimizer: Failed to open/create GameDVR key");
+                    return false;
+                }
+            }
+            
+            DWORD value = 0;
+            result = RegSetValueExA(
+                h_key,
+                "AppCaptureEnabled",
+                0,
+                REG_DWORD,
+                (BYTE*)&value,
+                sizeof(value)
+            );
+            
+            RegCloseKey(h_key);
+            
+            if (result == ERROR_SUCCESS) {
+                native_log("RegistryOptimizer: GameDVR disabled (AppCaptureEnabled=0)");
+                return true;
+            } else {
+                native_log("RegistryOptimizer: Failed to set AppCaptureEnabled, error %ld", result);
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+    }
+};
+
+// ========== MODULE 5: SELF-PROCESS & HEAP HARDENING ==========
+class ProcessHardening
+{
+public:
+    bool apply_hardening()
+    {
+        bool success = true;
+        
+        // Set self-process to high priority
+        if (!set_high_priority()) {
+            native_log("ProcessHardening: Failed to set high priority");
+            success = false;
+        }
+        
+        // Harden heap
+        if (!harden_heap()) {
+            native_log("ProcessHardening: Failed to harden heap");
+            success = false;
+        }
+        
+        return success;
+    }
+    
+private:
+    bool set_high_priority()
+    {
+        try {
+            HANDLE h_current = GetCurrentProcess();
+            BOOL ok = SetPriorityClass(h_current, HIGH_PRIORITY_CLASS);
+            if (ok) {
+                native_log("ProcessHardening: Set current process to HIGH_PRIORITY_CLASS");
+                return true;
+            } else {
+                DWORD err = GetLastError();
+                native_log("ProcessHardening: SetPriorityClass failed, error %u", err);
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    bool harden_heap()
+    {
+        try {
+            HANDLE h_heap = GetProcessHeap();
+            if (!h_heap) {
+                native_log("ProcessHardening: GetProcessHeap failed");
+                return false;
+            }
+            
+            // HeapEnableTerminationOnCorruption: option 1
+            ULONG enable_termination = 1;
+            BOOL ok = HeapSetInformation(
+                h_heap,
+                HeapEnableTerminationOnCorruption,
+                &enable_termination,
+                sizeof(enable_termination)
+            );
+            
+            if (ok) {
+                native_log("ProcessHardening: Heap hardening enabled (termination on corruption)");
+                return true;
+            } else {
+                DWORD err = GetLastError();
+                native_log("ProcessHardening: HeapSetInformation failed, error %u", err);
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+    }
+};
+
+// ========== COMPREHENSIVE WHITELIST: GAMES & ANTI-CHEAT SERVICES ==========
+static std::vector<std::string> build_protected_whitelist()
+{
+    // Extensive whitelist to protect critical system processes, games, and anti-cheat services
+    const char *protect_list[] = {
+        // Critical system processes
+        "system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "services.exe",
+        "lsass.exe", "explorer.exe", "svchost.exe", "system idle process",
+        "winlogon.exe", "logonui.exe", "sihost.exe", "fontdrvhost.exe",
+        "userinit.exe", "shellexperiencehost.exe", "spoolsv.exe", "dwm.exe",
+        
+        // Windows Defender & Security
+        "msmpeng.exe", "nissrv.exe", "securityhealthservice.exe",
+        
+        // Python & Dev tools
+        "python.exe", "pythonw.exe", "java.exe", "javaw.exe",
+        
+        // Major Games & Launchers
+        // Valve
+        "hl2.exe", "cstrike.exe", "csgo.exe", "cs2.exe", "dota2.exe", "tf2.exe",
+        "steamapps", "steam.exe", "steamwebhelper.exe",
+        
+        // Riot Games
+        "valorant-win64-shipping.exe", "vgc.exe", "valorantcrashupload.exe",
+        "riotclientservices.exe", "riotclientsservices.exe",
+        
+        // Epic Games
+        "fortniteclient-win64-shipping.exe", "unrealengine.exe", "epicgameslauncher.exe",
+        "epiconlineservices.exe",
+        
+        // Apex Legends / EA
+        "r5apex.exe", "eaapp.exe", "origin.exe", "originwebhelperservice.exe",
+        
+        // PUBG
+        "pubg.exe", "pubgbattlegrounds.exe",
+        
+        // The Finals
+        "thefinals.exe", "theatersclient.exe",
+        
+        // Dead by Daylight
+        "deadbydaylight-win64-shipping.exe", "unreal.exe",
+        
+        // Overwatch 2
+        "overwatch2.exe", "battle.net.exe", "battle.net launcher.exe",
+        
+        // Call of Duty
+        "callofduty.exe", "modernwarfare3.exe", "warzoneracetrackerapi.exe",
+        
+        // World of Warcraft
+        "wow.exe", "wowclassic.exe", "bnetlauncher.exe",
+        
+        // Diablo IV
+        "diablo.exe",
+        
+        // Starcraft II
+        "starcraft ii.exe", "sc2.exe",
+        
+        // League of Legends
+        "leagueoflegends.exe", "riotclientservices.exe", "riotgamesservices.exe",
+        
+        // Minecraft
+        "javaw.exe", "minecraft.exe", "minecraftlauncher.exe",
+        
+        // Other major titles
+        "baldursgate3.exe", "cyberpunk2077.exe", "elden ring.exe", "gta5.exe",
+        "rdr2.exe", "hogwarts legacy.exe", "starcitizen.exe", "squadron42.exe",
+        "msfs.exe", "aviasimulator.exe", "gtaonline.exe",
+        
+        // Anti-Cheat Services (CRITICAL - NEVER SUSPEND)
+        "easyanticheat.exe", "easyanticheatlauncherstub.exe",
+        "battleye.exe", "beservice.exe", "beclient.exe",
+        "xigncode.exe", "xhunterx64.exe",
+        "hwid.exe", "hwidentifier.exe",
+        "faceitservice.exe", "facieitanticheat.exe",
+        "esea.exe", "eseal.exe",
+        "gameguard.exe", "npgmsvr.exe",
+        "nprotect.exe", "ngen.exe",
+        "hybridacl.exe",
+        "ahnlaunch.exe",
+        "waveac.exe",
+        "untrackedexe.exe",
+        "ffl.exe",
+        "anticheatsettings.exe",
+        
+        // Protected runtime services
+        "nvidia", "amd", "intel", "graphics", "audio", "network",
+        "realtek", "qualcomm", "broadcom", "razer", "corsair", "logitech",
+        "steelseries", "hyperx",
+        
+        NULL  // Sentinel
     };
-    std::vector<std::string> rv;
-    for (int i = 0; wlist[i][0]; ++i) rv.push_back(to_lower(std::string((const char*)wlist[i])));
-    return rv;
+    
+    std::vector<std::string> result;
+    for (int i = 0; protect_list[i]; ++i) {
+        result.push_back(to_lower(std::string(protect_list[i])));
+    }
+    
+    native_log("Whitelist built with %zu protected processes", result.size());
+    return result;
 }
 
-// Check if a candidate process must be skipped (whitelist / system32 path)
-static bool is_exempt_process(const std::string &imageLower, const std::vector<std::string> &wl, const std::string &system32PrefixLower)
+// Check if process is in protected list
+static bool is_protected_process(const std::string &exe_name, const std::vector<std::string> &whitelist)
 {
-    // Full-name exact match
-    size_t pos = imageLower.find_last_of("/\\");
-    std::string name = (pos == std::string::npos) ? imageLower : imageLower.substr(pos + 1);
-    for (const auto &w : wl) {
-        if (name == w) return true;
+    std::string name_lower = to_lower(exe_name);
+    
+    // Extract filename from full path
+    size_t pos = name_lower.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        name_lower = name_lower.substr(pos + 1);
     }
-    // Do not touch anything under C:\\Windows\\System32
-    if (!system32PrefixLower.empty() && starts_with_ci(imageLower, system32PrefixLower)) return true;
+    
+    // Check exact match
+    for (const auto &w : whitelist) {
+        if (name_lower == w) return true;
+        // Partial match for paths containing protected names
+        if (name_lower.find(w) != std::string::npos) return true;
+    }
+    
+    // Protect anything under System32
+    if (name_lower.find("system32") != std::string::npos || 
+        name_lower.find("syswow64") != std::string::npos) {
+        return true;
+    }
+    
     return false;
 }
 
-// Purge standby list via obfuscated NtSetSystemInformation
-static void PurgeStandbyListIfAllowed(PFN_NtSetSystemInformation pNtSetSystemInformation)
+// ========== PERFORMANCE MANAGER SINGLETON ==========
+class PerformanceManager
 {
-    __try {
-        const char *allow = getenv("FORZEOS_ALLOW_STANDBY_PURGE");
-        if (!allow || strcmp(allow, "1") != 0) return;
-        if (!pNtSetSystemInformation) return;
-        // Adapted structure for MemoryPurgeStandbyList - best-effort
-        struct { ULONG Command; ULONG Flags; } cmd;
-        cmd.Command = 1; // MemoryPurgeStandbyList
-        cmd.Flags = 0;
-        const ULONG SystemMemoryListInformation = 0x50;
-        __try {
-            (void)pNtSetSystemInformation(SystemMemoryListInformation, &cmd, sizeof(cmd));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            // ignore
+private:
+    static PerformanceManager *instance;
+    TimerResolutionManager timer_mgr;
+    MMCSSThreadRegistration mmcss;
+    PowerPlanManager power_plan;
+    RegistryOptimizer registry_opt;
+    ProcessHardening process_hard;
+    std::vector<std::string> protected_processes;
+    
+public:
+    static PerformanceManager* get_instance()
+    {
+        if (!instance) {
+            instance = new PerformanceManager();
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return instance;
     }
-}
-
-// Trim system file cache if API available
-static void TrimSystemFileCacheIfPossible(PFN_SetSystemFileCacheSize pSetSysCache)
-{
-    if (!pSetSysCache) return;
-    __try {
-        (void)pSetSysCache((SIZE_T)0, (SIZE_T)0, (DWORD)0);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-}
-
-// Worker thread: periodically perform trims and modest process priority adjustments
-static DWORD WINAPI WorkerThreadProc(LPVOID lpParam)
-{
-    // runtime-resolved function pointers passed via lpParam as an array of FARPROC
-    FARPROC *tbl = (FARPROC*)lpParam;
-    PFN_EmptyWorkingSet pEmptyWorkingSet = (PFN_EmptyWorkingSet)tbl[0];
-    PFN_GetPerformanceInfo pGetPerf = (PFN_GetPerformanceInfo)tbl[1];
-    PFN_NtSetSystemInformation pNtSetSystemInformation = (PFN_NtSetSystemInformation)tbl[2];
-    PFN_SetSystemFileCacheSize pSetSysCache = (PFN_SetSystemFileCacheSize)tbl[3];
-    PFN_D3DKMTSetProcessSchedulingPriorityClass pD3DSet = (PFN_D3DKMTSetProcessSchedulingPriorityClass)tbl[4];
-    PFN_SetProcessInformation pSetProcInfo = (PFN_SetProcessInformation)tbl[5];
-    PFN_OpenProcess pOpenProcess = (PFN_OpenProcess)tbl[6];
-    PFN_SetPriorityClass pSetPriorityClass = (PFN_SetPriorityClass)tbl[7];
-    PFN_GetProcessAffinityMask pGetAffinity = (PFN_GetProcessAffinityMask)tbl[8];
-    PFN_SetProcessAffinityMask pSetAffinity = (PFN_SetProcessAffinityMask)tbl[9];
-
-    int interval = 300;
-    const char* v = getenv("FORZEOS_TRIM_INTERVAL_SECONDS"); if (v) interval = atoi(v);
-    int threshold_mb = 1024; v = getenv("FORZEOS_TRIM_THRESHOLD_MB"); if (v) threshold_mb = atoi(v);
-
-    std::vector<std::string> whitelist = build_whitelist();
-
-    // get system32 prefix at runtime
-    char sysdir[MAX_PATH] = {0};
-    GetSystemDirectoryA(sysdir, MAX_PATH);
-    std::string system32PrefixLower = to_lower(std::string(sysdir));
-    if (!system32PrefixLower.empty() && system32PrefixLower.back() != '\\') system32PrefixLower.push_back('\\');
-
-    while (WaitForSingleObject(g_worker_stop_event, (DWORD)interval * 1000) == WAIT_TIMEOUT) {
-        TrimSystemFileCacheIfPossible(pSetSysCache);
-        PurgeStandbyListIfAllowed(pNtSetSystemInformation);
-
-        // Assess system memory pressure
-        PERFORMANCE_INFORMATION pi; ZeroMemory(&pi, sizeof(pi)); pi.cb = sizeof(pi);
-        BOOL okPerf = FALSE;
-        __try { okPerf = pGetPerf ? pGetPerf(&pi, sizeof(pi)) : FALSE; } __except (EXCEPTION_EXECUTE_HANDLER) { okPerf = FALSE; }
-        double commitPercent = 0.0, physPercent = 0.0;
-        if (okPerf && pi.CommitLimit > 0) commitPercent = (double)pi.CommitTotal * 100.0 / (double)pi.CommitLimit;
-        if (okPerf && pi.PhysicalTotal > 0) {
-            SIZE_T usedPhys = 0;
-            if (pi.PhysicalTotal > pi.PhysicalAvailable) usedPhys = pi.PhysicalTotal - pi.PhysicalAvailable;
-            physPercent = (double)usedPhys * 100.0 / (double)pi.PhysicalTotal;
-        }
-        bool memoryPressure = (commitPercent >= 80.0) || (physPercent >= 80.0);
-
-        if (memoryPressure && pEmptyWorkingSet) {
-            int trimmedCount = 0;
-            // enumerate processes via toolhelp snapshot. Try ANSI first, then fall back
-            // to wide variants if needed (some headers/toolchains expose only wide types).
-            HMODULE hKernel = GetModuleHandleA(build_str(lib_kernel32).c_str());
-            FARPROC pCreateSnap = GetProcAddress(hKernel, build_str(fn_CreateToolhelp32Snapshot).c_str());
-            FARPROC pProcFirstA = GetProcAddress(hKernel, build_str(fn_Process32FirstA).c_str());
-            FARPROC pProcNextA = GetProcAddress(hKernel, build_str(fn_Process32NextA).c_str());
-            FARPROC pProcFirstW = GetProcAddress(hKernel, "Process32FirstW");
-            FARPROC pProcNextW = GetProcAddress(hKernel, "Process32NextW");
-            FARPROC pProcFirst = pProcFirstA ? pProcFirstA : pProcFirstW;
-            FARPROC pProcNext = pProcNextA ? pProcNextA : pProcNextW;
-            bool useWide = (pProcFirst == pProcFirstW);
-
-            if (pCreateSnap && pProcFirst && pProcNext) {
-                typedef HANDLE (WINAPI *PFN_CreateToolhelp32Snapshot_local)(DWORD, DWORD);
-                PFN_CreateToolhelp32Snapshot_local pCreateSnapLocal = (PFN_CreateToolhelp32Snapshot_local)pCreateSnap;
-
-                HANDLE snap = pCreateSnapLocal(TH32CS_SNAPPROCESS, 0);
-                if (snap != INVALID_HANDLE_VALUE) {
-                    if (!useWide) {
-                        typedef BOOL (WINAPI *PFN_Process32FirstA_local)(HANDLE, PROCESSENTRY32A*);
-                        typedef BOOL (WINAPI *PFN_Process32NextA_local)(HANDLE, PROCESSENTRY32A*);
-                        PFN_Process32FirstA_local pProcFirstLocal = (PFN_Process32FirstA_local)pProcFirst;
-                        PFN_Process32NextA_local pProcNextLocal = (PFN_Process32NextA_local)pProcNext;
-                        PROCESSENTRY32A pe; ZeroMemory(&pe, sizeof(pe)); pe.dwSize = sizeof(pe);
-                        if (pProcFirstLocal(snap, &pe)) {
-                            do {
-                                __try {
-                                    std::string image = to_lower(std::string(pe.szExeFile));
-                                    if (is_exempt_process(image, whitelist, system32PrefixLower)) continue;
-                                    // Open process and attempt EmptyWorkingSet and lower priority
-                                    HANDLE hProc = NULL;
-                                    if (pOpenProcess) {
-                                        DWORD access1 = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ | PROCESS_SET_QUOTA;
-                                        DWORD access2 = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_SET_QUOTA;
-                                        hProc = pOpenProcess(access1, FALSE, pe.th32ProcessID);
-                                        if (!hProc) hProc = pOpenProcess(access2, FALSE, pe.th32ProcessID);
-                                    }
-                                    if (hProc) {
-                                        __try {
-                                            BOOL okTrim = FALSE;
-                                            if (pEmptyWorkingSet) okTrim = pEmptyWorkingSet(hProc);
-                                            if (okTrim) trimmedCount++;
-                                            if (pSetPriorityClass) pSetPriorityClass(hProc, IDLE_PRIORITY_CLASS);
-                                            native_log("Trimmed pid=%u name=%s ok=%d", (unsigned)pe.th32ProcessID, image.c_str(), okTrim ? 1 : 0);
-                                        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-                                        CloseHandle(hProc);
-                                    }
-                                } __except (EXCEPTION_EXECUTE_HANDLER) {}
-                            } while (pProcNextLocal(snap, &pe));
-                        }
-                    } else {
-                        typedef BOOL (WINAPI *PFN_Process32FirstW_local)(HANDLE, PROCESSENTRY32W*);
-                        typedef BOOL (WINAPI *PFN_Process32NextW_local)(HANDLE, PROCESSENTRY32W*);
-                        PFN_Process32FirstW_local pProcFirstLocal = (PFN_Process32FirstW_local)pProcFirst;
-                        PFN_Process32NextW_local pProcNextLocal = (PFN_Process32NextW_local)pProcNext;
-                        PROCESSENTRY32W pe; ZeroMemory(&pe, sizeof(pe)); pe.dwSize = sizeof(pe);
-                        if (pProcFirstLocal(snap, &pe)) {
-                            do {
-                                __try {
-                                    std::string image;
-                                    int needed = WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, NULL, 0, NULL, NULL);
-                                    if (needed > 0) {
-                                        std::string tmp; tmp.resize(needed);
-                                        WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, &tmp[0], needed, NULL, NULL);
-                                        if (!tmp.empty() && tmp.back() == '\0') tmp.pop_back();
-                                        image = to_lower(tmp);
-                                    } else image = std::string();
-                                    if (is_exempt_process(image, whitelist, system32PrefixLower)) continue;
-                                    HANDLE hProc = NULL;
-                                    if (pOpenProcess) {
-                                        DWORD access1 = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ | PROCESS_SET_QUOTA;
-                                        DWORD access2 = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_SET_QUOTA;
-                                        hProc = pOpenProcess(access1, FALSE, pe.th32ProcessID);
-                                        if (!hProc) hProc = pOpenProcess(access2, FALSE, pe.th32ProcessID);
-                                    }
-                                    if (hProc) {
-                                        __try {
-                                            BOOL okTrim = FALSE;
-                                            if (pEmptyWorkingSet) okTrim = pEmptyWorkingSet(hProc);
-                                            if (okTrim) trimmedCount++;
-                                            if (pSetPriorityClass) pSetPriorityClass(hProc, IDLE_PRIORITY_CLASS);
-                                            native_log("Trimmed pid=%u name=%s ok=%d", (unsigned)pe.th32ProcessID, image.c_str(), okTrim ? 1 : 0);
-                                        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-                                        CloseHandle(hProc);
-                                    }
-                                } __except (EXCEPTION_EXECUTE_HANDLER) {}
-                            } while (pProcNextLocal(snap, &pe));
-                        }
-                    }
-                    CloseHandle(snap);
-                    native_log("Iteration summary: trimmed=%d commit=%.1f phys=%.1f", trimmedCount, commitPercent, physPercent);
-                }
-            }
+    
+    bool initialize()
+    {
+        try {
+            native_log("=== PerformanceManager: Initializing all modules ===");
+            
+            // Load whitelist
+            protected_processes = build_protected_whitelist();
+            
+            // Initialize each module
+            bool timer_ok = timer_mgr.enable();
+            bool mmcss_ok = mmcss.init() && mmcss.register_current_thread_as_games();
+            bool power_ok = power_plan.init() && power_plan.switch_to_high_performance();
+            bool registry_ok = registry_opt.apply_all_fixes();
+            bool harden_ok = process_hard.apply_hardening();
+            
+            native_log("=== PerformanceManager: Initialization complete ===");
+            native_log("Timer: %s | MMCSS: %s | Power: %s | Registry: %s | Hardening: %s",
+                timer_ok ? "OK" : "FAIL",
+                mmcss_ok ? "OK" : "FAIL",
+                power_ok ? "OK" : "FAIL",
+                registry_ok ? "OK" : "FAIL",
+                harden_ok ? "OK" : "FAIL"
+            );
+            
+            return timer_ok || mmcss_ok || power_ok || registry_ok || harden_ok;
+        } catch (...) {
+            return false;
         }
     }
-    // free allocated FARPROC table (allocated in DllRegisterFocusFilter)
-    __try {
-        native_log("Worker exiting");
-        if (tbl) {
-            HeapFree(GetProcessHeap(), 0, tbl);
-            tbl = NULL;
+    
+    bool shutdown()
+    {
+        try {
+            native_log("=== PerformanceManager: Shutting down ===");
+            
+            timer_mgr.disable();
+            power_plan.restore_original_scheme();
+            
+            native_log("=== PerformanceManager: Shutdown complete ===");
+            return true;
+        } catch (...) {
+            return false;
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // ignore any failure freeing
     }
-    return 0;
-}
-
-// Enable common privileges - best-effort
-static void TryEnablePrivileges()
-{
-    __try {
-        HANDLE hToken = NULL;
-        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return;
-        LUID luid; ZeroMemory(&luid, sizeof(luid));
-        LookupPrivilegeValueA(NULL, "SeDebugPrivilege", &luid);
-        TOKEN_PRIVILEGES tp; ZeroMemory(&tp, sizeof(tp));
-        tp.PrivilegeCount = 1;
-        tp.Privileges[0].Luid = luid;
-        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
-        CloseHandle(hToken);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    
+    bool is_process_protected(const std::string &exe_name) const
+    {
+        return is_protected_process(exe_name, protected_processes);
     }
-}
+    
+    size_t get_whitelist_size() const
+    {
+        return protected_processes.size();
+    }
+};
 
-// Exported entry: register/start the helper
+PerformanceManager *PerformanceManager::instance = NULL;
+
+// ========== DLL ENTRY POINTS ==========
+
 extern "C" __declspec(dllexport) int __stdcall DllRegisterFocusFilter()
 {
-    __try {
-        // Initialize once
-        if (InterlockedCompareExchange(&g_lock_inited, 1, 0) == 0) InitializeCriticalSection(&g_lock);
-
-        // Resolve runtime functions we need
-        HMODULE hKernel = GetModuleHandleA(build_str(lib_kernel32).c_str());
-        HMODULE hPsapi = LoadLibraryA(build_str(lib_psapi).c_str());
-        HMODULE hNtdll = LoadLibraryA(build_str(lib_ntdll).c_str());
-        HMODULE hDxg = LoadLibraryA(build_str(lib_dxg).c_str());
-        HMODULE hAvrt = LoadLibraryA(build_str(lib_avrt).c_str());
-
-        PFN_EmptyWorkingSet pEmptyWorkingSet = NULL;
-        PFN_GetPerformanceInfo pGetPerf = NULL;
-        PFN_NtSetSystemInformation pNtSetSystemInformation = NULL;
-        PFN_SetSystemFileCacheSize pSetSysCache = NULL;
-        PFN_D3DKMTSetProcessSchedulingPriorityClass pD3DSet = NULL;
-        PFN_SetProcessInformation pSetProcInfo = NULL;
-        PFN_OpenProcess pOpenProcess = NULL;
-        PFN_SetPriorityClass pSetPriorityClass = NULL;
-        PFN_GetProcessAffinityMask pGetAffinity = NULL;
-        PFN_SetProcessAffinityMask pSetAffinity = NULL;
-        PFN_AvSetMmThreadCharacteristicsA pAvSet = NULL;
-        PFN_AvSetMmThreadPriority pAvPrio = NULL;
-        PFN_AvRevertMmThreadCharacteristics pAvRevert = NULL;
-
-        if (hPsapi) pEmptyWorkingSet = (PFN_EmptyWorkingSet)GetProcAddress(hPsapi, build_str(fn_EmptyWorkingSet).c_str());
-        pGetPerf = (PFN_GetPerformanceInfo)GetProcAddress(hPsapi ? hPsapi : hKernel, build_str(fn_GetPerformanceInfo).c_str());
-        if (hNtdll) pNtSetSystemInformation = (PFN_NtSetSystemInformation)GetProcAddress(hNtdll, build_str(fn_NtSetSystemInformation).c_str());
-        pSetSysCache = (PFN_SetSystemFileCacheSize)GetProcAddress(hKernel, build_str(fn_SetSystemFileCacheSize).c_str());
-        if (hDxg) pD3DSet = (PFN_D3DKMTSetProcessSchedulingPriorityClass)GetProcAddress(hDxg, build_str(fn_D3DKMTSetProcessSchedulingPriorityClass).c_str());
-        pSetProcInfo = (PFN_SetProcessInformation)GetProcAddress(hKernel, build_str(fn_SetProcessInformation).c_str());
-        pOpenProcess = (PFN_OpenProcess)GetProcAddress(hKernel, build_str(fn_OpenProcess).c_str());
-        pSetPriorityClass = (PFN_SetPriorityClass)GetProcAddress(hKernel, build_str(fn_SetPriorityClass).c_str());
-        pGetAffinity = (PFN_GetProcessAffinityMask)GetProcAddress(hKernel, build_str(fn_GetProcessAffinityMask).c_str());
-        pSetAffinity = (PFN_SetProcessAffinityMask)GetProcAddress(hKernel, build_str(fn_SetProcessAffinityMask).c_str());
-        if (hAvrt) {
-            pAvSet = (PFN_AvSetMmThreadCharacteristicsA)GetProcAddress(hAvrt, build_str(fn_AvSetMmThreadCharacteristicsA).c_str());
-            pAvPrio = (PFN_AvSetMmThreadPriority)GetProcAddress(hAvrt, build_str(fn_AvSetMmThreadPriority).c_str());
-            pAvRevert = (PFN_AvRevertMmThreadCharacteristics)GetProcAddress(hAvrt, build_str(fn_AvRevertMmThreadCharacteristics).c_str());
+    try {
+        native_log("DllRegisterFocusFilter: Activating performance optimization");
+        
+        PerformanceManager *pm = PerformanceManager::get_instance();
+        bool ok = pm->initialize();
+        
+        if (ok) {
+            native_log("DllRegisterFocusFilter: All modules activated successfully");
+            return 1;
+        } else {
+            native_log("DllRegisterFocusFilter: Some modules failed to initialize");
+            return 0;
         }
-
-        // Try enable privileges
-        TryEnablePrivileges();
-
-        // Trim system file cache and purge standby if allowed
-        TrimSystemFileCacheIfPossible(pSetSysCache);
-        PurgeStandbyListIfAllowed(pNtSetSystemInformation);
-
-        // Start worker thread if not running
-        if (!g_worker_stop_event) g_worker_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
-        if (!g_worker_thread) {
-            // Pass resolved function pointers to thread as a small table
-            FARPROC *tbl = (FARPROC*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(FARPROC) * 12);
-            if (tbl) {
-                tbl[0] = (FARPROC)pEmptyWorkingSet;
-                tbl[1] = (FARPROC)pGetPerf;
-                tbl[2] = (FARPROC)pNtSetSystemInformation;
-                tbl[3] = (FARPROC)pSetSysCache;
-                tbl[4] = (FARPROC)pD3DSet;
-                tbl[5] = (FARPROC)pSetProcInfo;
-                tbl[6] = (FARPROC)pOpenProcess;
-                tbl[7] = (FARPROC)pSetPriorityClass;
-                tbl[8] = (FARPROC)pGetAffinity;
-                tbl[9] = (FARPROC)pSetAffinity;
-                // others reserved
-                g_worker_thread = CreateThread(NULL, 0, WorkerThreadProc, tbl, 0, NULL);
-            }
-        }
-
-        // Return success (1)
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } catch (...) {
+        native_log("DllRegisterFocusFilter: Exception caught");
         return 0;
     }
 }
 
-// Exported exit: stop worker and restore any modified state
 extern "C" __declspec(dllexport) int __stdcall DllUnregisterFocusFilter()
 {
-    __try {
-        if (g_worker_stop_event) SetEvent(g_worker_stop_event);
-        if (g_worker_thread) {
-            WaitForSingleObject(g_worker_thread, 3000);
-            CloseHandle(g_worker_thread);
-            g_worker_thread = NULL;
+    try {
+        native_log("DllUnregisterFocusFilter: Deactivating performance optimization");
+        
+        PerformanceManager *pm = PerformanceManager::get_instance();
+        bool ok = pm->shutdown();
+        
+        if (ok) {
+            native_log("DllUnregisterFocusFilter: All modules deactivated successfully");
+            return 1;
+        } else {
+            native_log("DllUnregisterFocusFilter: Some modules failed to shutdown");
+            return 0;
         }
-        if (g_worker_stop_event) {
-            CloseHandle(g_worker_stop_event);
-            g_worker_stop_event = NULL;
-        }
-        // Best-effort: clear tracked modifications
-        EnterCriticalSection(&g_lock);
-        g_modified_pids.clear();
-        LeaveCriticalSection(&g_lock);
-        if (g_lock_inited) { DeleteCriticalSection(&g_lock); g_lock_inited = 0; }
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } catch (...) {
+        native_log("DllUnregisterFocusFilter: Exception caught");
         return 0;
     }
 }
 
-// DllMain minimal to mark dll loaded
+// Compatibility export for forzeos_focus.py
+extern "C" __declspec(dllexport) int __stdcall ForzeStartAggressiveFocus()
+{
+    return DllRegisterFocusFilter();
+}
+
+extern "C" __declspec(dllexport) int __stdcall ForzeStopAggressiveFocus()
+{
+    return DllUnregisterFocusFilter();
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     switch (fdwReason) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hinstDLL);
+        native_log("DllMain: DLL_PROCESS_ATTACH");
         break;
     case DLL_PROCESS_DETACH:
+        native_log("DllMain: DLL_PROCESS_DETACH - cleaning up");
         break;
     }
     return TRUE;

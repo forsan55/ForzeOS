@@ -218,14 +218,16 @@ def _load_aggressive_dll():
                 last_exc = e_cdll
                 raise last_exc
 
-        # optional prototypes (use benign exported names)
+        # Public application API exposed by the transparent native module.
         try:
-            _aggressive.DllRegisterFocusFilter.argtypes = []
-            _aggressive.DllRegisterFocusFilter.restype = ctypes.c_int
-            _aggressive.DllUnregisterFocusFilter.argtypes = []
-            _aggressive.DllUnregisterFocusFilter.restype = ctypes.c_int
-        except Exception:
-            pass
+            _aggressive.ForzeStartAggressiveFocus.argtypes = []
+            _aggressive.ForzeStartAggressiveFocus.restype = ctypes.c_int
+            _aggressive.ForzeStopAggressiveFocus.argtypes = []
+            _aggressive.ForzeStopAggressiveFocus.restype = ctypes.c_int
+        except AttributeError:
+            logger.error('Aggressive Focus DLL has obsolete exports; rebuild it from forze_aggressive_focus.cpp')
+            _aggressive = None
+            return False
         logger.info('Aggressive Focus native module loaded: %s', path)
         # cleanup add_dll_directory handle if we created one
         try:
@@ -274,8 +276,8 @@ def _try_build_aggressive_dll() -> bool:
     # prefer MSVC if available
     cl = shutil.which('cl')
     if cl:
-        # MSVC: cl /LD forze_aggressive_focus.cpp psapi.lib /link /OUT:forze_aggressive_focus.dll
-        cmd = ['cl', '/LD', src, 'psapi.lib', '/link', f'/OUT:{out}']
+        # MSVC: link every direct Win32 dependency used by the transparent module.
+        cmd = ['cl', '/std:c++17', '/LD', src, 'psapi.lib', 'winmm.lib', 'powrprof.lib', 'avrt.lib', 'advapi32.lib', '/link', f'/OUT:{out}']
         try:
             logger.info('Attempting to build aggressive DLL with MSVC: %s', ' '.join(cmd))
             p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False, cwd=os.path.dirname(os.path.abspath(__file__)), timeout=120)
@@ -289,7 +291,7 @@ def _try_build_aggressive_dll() -> bool:
     if gpp:
         # MinGW: attempt a static-linked DLL to reduce external dependencies where possible
         # Note: static linking may not always be possible on all toolchains; this is best-effort.
-        cmd = [gpp, '-shared', '-o', out, src, '-lpsapi', '-static', '-static-libgcc', '-static-libstdc++']
+        cmd = [gpp, '-std=c++17', '-shared', '-o', out, src, '-lpsapi', '-lwinmm', '-lpowrprof', '-lavrt', '-ladvapi32', '-static', '-static-libgcc', '-static-libstdc++']
         try:
             logger.info('Attempting to build aggressive DLL with g++: %s', ' '.join(cmd))
             p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False, cwd=os.path.dirname(os.path.abspath(__file__)), timeout=120)
@@ -352,7 +354,7 @@ def enter_aggressive_focus_mode(instance):
         except Exception:
             pass
         try:
-            res = _aggressive.DllRegisterFocusFilter()
+            res = _aggressive.ForzeStartAggressiveFocus()
         except Exception:
             res = 0
         msg = f'Aggressive Focus native start returned: {res}'
@@ -381,7 +383,7 @@ def exit_aggressive_focus_mode(instance) -> Optional[FocusModeState]:
     try:
         if _aggressive is not None:
             try:
-                _aggressive.DllUnregisterFocusFilter()
+                _aggressive.ForzeStopAggressiveFocus()
             except Exception:
                 logger.exception('Aggressive native stop failed')
             else:
@@ -932,7 +934,7 @@ def _perform_focus_actions(instance, state: FocusModeState):
                                         res = 0
                                         try:
                                             try:
-                                                res = _aggressive.DllRegisterFocusFilter()
+                                                res = _aggressive.ForzeStartAggressiveFocus()
                                             except Exception:
                                                 res = 0
                                         except Exception:
