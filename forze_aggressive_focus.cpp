@@ -107,6 +107,24 @@ static std::string to_lower(const std::string &s)
     return out;
 }
 
+// Convert UTF-16 process names from Toolhelp32 to UTF-8 so they can be stored
+// in std::string on Unicode builds of the DLL.
+static std::string utf8_from_utf16(const wchar_t *text)
+{
+    if (!text || !*text) {
+        return std::string();
+    }
+
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
+    if (size_needed <= 0) {
+        return std::string();
+    }
+
+    std::string out(static_cast<size_t>(size_needed) - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, &out[0], size_needed, NULL, NULL);
+    return out;
+}
+
 // ========== MODULE 1: HIGH PRECISION TIMER RESOLUTION ==========
 class TimerResolutionManager
 {
