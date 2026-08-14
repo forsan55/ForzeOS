@@ -25,6 +25,7 @@ import gc
 import signal
 import weakref
 import atexit
+import struct
 from typing import Optional, Dict, List
 
 try:
@@ -157,6 +158,44 @@ def _find_aggressive_dll_path():
         return AGGRESSIVE_DLL_NAME
 
 
+def _is_valid_windows_dll_for_python(path: str) -> bool:
+    """Return True only for a plausible 32/64-bit PE DLL matching the running Python."""
+    try:
+        if not path or not os.path.isfile(path):
+            return False
+        with open(path, 'rb') as fh:
+            header = fh.read(4096)
+        if len(header) < 64 or header[:2] != b'MZ':
+            return False
+        pe_offset = struct.unpack_from('<I', header, 0x3C)[0]
+        if pe_offset + 24 > len(header):
+            return False
+        if header[pe_offset:pe_offset + 4] != b'PE\x00\x00':
+            return False
+
+        machine = struct.unpack_from('<H', header, pe_offset + 4)[0]
+        # PE machine values: x86 = 0x014c, x64 = 0x8664
+        is_64bit_python = struct.calcsize('P') == 8
+        valid_machine = (0x014c, 0x8664)
+        if machine not in valid_machine:
+            return False
+        if is_64bit_python and machine != 0x8664:
+            return False
+        if not is_64bit_python and machine != 0x014c:
+            return False
+
+        num_sections = struct.unpack_from('<H', header, pe_offset + 6)[0]
+        if num_sections == 0:
+            return False
+
+        # Reject very small fake/stub DLLs and obviously corrupt images.
+        if os.path.getsize(path) < 4096:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _load_aggressive_dll():
     """Attempt to load the aggressive native DLL (Windows). Returns True on success."""
     global _aggressive
@@ -181,6 +220,14 @@ def _load_aggressive_dll():
                 return False
         except Exception:
             return False
+
+    if not _is_valid_windows_dll_for_python(path):
+        logger.warning(
+            'Aggressive Focus DLL exists at %s but is not a valid Windows PE DLL for this Python architecture; falling back to Python focus mode.',
+            path,
+        )
+        return False
+
     try:
         # Ensure ctypes is available here (function may be called before other imports)
         import ctypes
