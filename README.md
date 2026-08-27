@@ -15,7 +15,7 @@ PASSWORD - Forze esp32
 
 ---
 
-## 🛠️ Installation & Setup (Linux)
+## 🛠️ Installation & Setup (Linux) Remind - ForzeOS not for linux
 Follow these steps to get ForzeOS running on your system:
 
 1. **Install Dependencies:**
@@ -45,6 +45,7 @@ Follow these steps to get ForzeOS running on your system:
 * **AI & Hybrid Assistants:** `assistant_ai.py`, `assistant_ai_offline.py`, `hybrid_assistant.py` (Manages memory via `assistant_memory_large.json`)
 * **Utilities:** `forze_audio_settings.py`, `forze_wikipedia.py`, `math_engine.py`, `forzeos_focus.py`
 * **Web Integration:** `forzeos_pyqt_browser.py`, `forzeos_pywebview_process.py`
+* **Windows Privacy, Creating app program:** `forze_market.py` 
 
 ### ⚡ C++ Hybrid Integration
 ForzeOS utilizes compiled C++ for high-performance window management:
@@ -53,6 +54,9 @@ ForzeOS utilizes compiled C++ for high-performance window management:
 ### ⚙️ Configuration & Assets
 * `forzeos_config.json`: Central configuration file for paths, AI settings, and UI tweaks.
 * `forze_assets/`: Directory containing system icons and AI stabilization assets.
+
+### 🔒 Privacy & Windows security 
+* `forze_market.py`: Shadow Gate Windows update control, telemetry settings, BloatWareManager list the apps takes your information, AccountSetupHelper for windows accounts, Recall Snapshot control (Windows).
 
 ---
 
@@ -89,6 +93,8 @@ ForzeOS is more than just a standard Python project; it is a modular architectur
 
 
 * **Integrated AI Assistant:** Includes an offline AI assistant with persistent memory, capable of handling commands and interactions.
+
+* **Shadow Gate Windows security manager:** It helps control Windows Telemetry, Recall snapshots, Apps and AMD/Intel CPU network packet management for privacy. Shadow Gate doesn't let Windows restart suddenly for updates, letting you control them manually with a safe undo option.
 
 
 * **Rich Application Ecosystem:** Comes pre-loaded with a web browser, PDF reader, video player, AES-encrypted password manager, and more.
@@ -134,7 +140,6 @@ python forze_launcher.py
 
 
 * **Performance:** Optimized for efficient task handling and system resource management.
-
 
 
 ## 👥 Credits
