@@ -20,6 +20,7 @@ import os
 import json
 import csv
 import io
+import platform
 import subprocess
 import traceback
 import threading
@@ -338,109 +339,6 @@ class ShadowGateAuditor:
                 try:
                     tmp.writelines(lines)
                     tmp.close()
-                    os.replace(tmp.name, str(hosts_path))
-                except Exception:
-                    try:
-                        tmp.close()
-                    except Exception:
-                        pass
-                    raise
-
-            result['status'] = 'completed'
-            return result
-        except Exception as exc:
-            result['status'] = 'error'
-            result['errors'].append(str(exc))
-            return result
-
-    def _rollback_telemetry_tasks(self):
-        result = {'enabled': [], 'errors': []}
-        if not self._windows_available():
-            result['status'] = 'unsupported'
-            return result
-        if not self._has_admin():
-            result['status'] = 'no_admin'
-            return result
-
-        task_names = self._list_telemetry_tasks()
-        for task in task_names:
-            rc, out, err = self._run_process(['schtasks', '/Change', '/TN', task, '/Enable'])
-            if rc == 0:
-                result['enabled'].append(task)
-            else:
-                result['errors'].append({'task': task, 'error': err or out})
-
-        result['status'] = 'completed' if not result['errors'] else 'partial'
-        return result
-
-    def rollback(self):
-        results = {'admin': self._has_admin()}
-        results['hosts'] = self._rollback_hosts()
-        results['firewall'] = self._rollback_firewall_rules()
-        results['scheduler'] = self._rollback_telemetry_tasks()
-        self._schedule_report(results)
-        return results
-
-    def _rollback_firewall_rules(self):
-        result = {'removed': [], 'errors': []}
-        if not self._windows_available():
-            result['status'] = 'unsupported'
-            return result
-        if not self._has_admin():
-            result['status'] = 'no_admin'
-            return result
-
-        rule_names = [
-            'ForzeOS ShadowGate Privacy Hardening - Inbound TCP',
-            'ForzeOS ShadowGate Privacy Hardening - Outbound TCP',
-            'ForzeOS ShadowGate Privacy Hardening - Inbound UDP',
-            'ForzeOS ShadowGate Privacy Hardening - Outbound UDP'
-        ]
-        for rule in rule_names:
-            rc, out, err = self._run_process(['netsh', 'advfirewall', 'firewall', 'delete', 'rule', f'name={rule}'])
-            if rc == 0:
-                result['removed'].append(rule)
-            elif 'No rules match the specified criteria' not in (err or out):
-                result['errors'].append({'rule': rule, 'error': err or out})
-
-        result['status'] = 'completed' if not result['errors'] else 'partial'
-        return result
-
-    def _rollback_hosts(self):
-        result = {'removed': [], 'errors': []}
-        if not self._windows_available():
-            result['status'] = 'unsupported'
-            return result
-        if not self._has_admin():
-            result['status'] = 'no_admin'
-            return result
-
-        hosts_path = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'drivers' / 'etc' / 'hosts'
-        if not hosts_path.exists():
-            result['status'] = 'missing_hosts'
-            result['errors'].append('Hosts file not found')
-            return result
-
-        try:
-            lines = []
-            removed_hosts = set(self.HOSTS_REDIRECTS.keys())
-            with hosts_path.open('r', encoding='utf-8', errors='replace') as f:
-                for line in f:
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith('#'):
-                        lines.append(line)
-                        continue
-                    parts = stripped.split()
-                    if len(parts) >= 2 and parts[1].lower() in removed_hosts:
-                        result['removed'].append(parts[1].lower())
-                        continue
-                    lines.append(line)
-
-            if result['removed']:
-                tmp = tempfile.NamedTemporaryFile('w', delete=False, suffix='.tmp', dir=str(hosts_path.parent), encoding='utf-8', newline='\n')
-                try:
-                    tmp.writelines(lines)
-                    tmp.close()
                     try:
                         os.replace(tmp.name, str(hosts_path))
                     except Exception as exc_replace:
@@ -657,6 +555,368 @@ class ShadowGateAuditor:
             pass
 
 
+PRIVACY_BACKUP_PATH = Path(__file__).with_name('shadowgate_backup.json')
+
+
+class _PrivacyModule:
+    """Reversible, capability-detected Windows controls for the Market UI."""
+    name = 'Windows control'
+
+    def __init__(self, parent=None):
+        self.parent = parent
+
+    def _windows_available(self):
+        return sys.platform.startswith('win')
+
+    def _run(self, args, timeout=30):
+        try:
+            kwargs = {
+                'capture_output': True,
+                'text': True,
+                'shell': False,
+                'timeout': timeout,
+            }
+            if sys.platform.startswith('win'):
+                kwargs['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            proc = subprocess.run(args, **kwargs)
+            return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+        except Exception as exc:
+            return -1, '', str(exc)
+
+    def _system_info(self):
+        info = {'platform': platform.platform(), 'version': platform.win32_ver(), 'build': None}
+        if self._windows_available():
+            rc, out, _ = self._run(['powershell', '-NoProfile', '-NonInteractive', '-Command',
+                "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').CurrentBuild"])
+            if rc == 0:
+                info['build'] = out
+        return info
+
+    def _status(self, status, message='', **extra):
+        result = {'status': status, 'message': message, 'system': self._system_info()}
+        result.update(extra)
+        return result
+
+    def _admin_required(self):
+        if not self._windows_available():
+            return self._status('unsupported', 'Only Windows is supported.')
+        try:
+            if not ctypes.windll.shell32.IsUserAnAdmin():
+                return self._status('requires_admin', 'Administrator permission is required.')
+        except Exception:
+            return self._status('requires_admin', 'Administrator permission is required.')
+        return None
+
+    def _backup(self, key, data):
+        try:
+            current = json.loads(PRIVACY_BACKUP_PATH.read_text(encoding='utf-8')) if PRIVACY_BACKUP_PATH.exists() else {}
+            current.setdefault(key, {}).update(data)
+            PRIVACY_BACKUP_PATH.write_text(json.dumps(current, indent=2), encoding='utf-8')
+        except Exception:
+            logger.exception('Privacy backup failed: %s', key)
+
+    def _saved(self, key):
+        try:
+            return json.loads(PRIVACY_BACKUP_PATH.read_text(encoding='utf-8')).get(key, {})
+        except Exception:
+            return {}
+
+    def _ps(self, command):
+        return self._run(['powershell', '-NoProfile', '-NonInteractive', '-Command', command])
+
+    def _read_dword(self, path, name):
+        rc, out, _ = self._ps(f"$x=Get-ItemProperty -Path '{path}' -Name '{name}' -ErrorAction SilentlyContinue; if ($null -ne $x) {{ $x.{name} }}")
+        return out if rc == 0 and out else None
+
+    def _restore_dword(self, path, name, value):
+        if value is None:
+            self._ps(f"Remove-ItemProperty -Path '{path}' -Name '{name}' -ErrorAction SilentlyContinue")
+        else:
+            self._ps(f"New-Item -Path '{path}' -Force | Out-Null; New-ItemProperty -Path '{path}' -Name '{name}' -PropertyType DWord -Value {int(value)} -Force | Out-Null")
+
+    def detect(self):
+        return self._status('available' if self._windows_available() else 'unsupported',
+                            'Windows capability is available.' if self._windows_available() else 'Only Windows is supported.')
+
+
+class UpdateControlManager(_PrivacyModule):
+    name = 'Windows Update control'
+    SETTINGS_PATH = r'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings'
+    POLICY_PATH = r'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+
+    def detect(self):
+        if not self._windows_available():
+            return self._status('unsupported', 'Only Windows is supported.')
+        rc, out, _ = self._ps("$p=Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\WindowsUpdate\\UX\\Settings' -ErrorAction SilentlyContinue; if ($p.PauseUpdatesExpiryTime) {'pause_native'}; if ($p.ActiveHoursStart -ne $null) {'active_hours'}")
+        return self._status('available', 'Native settings detected.' if out else 'Legacy documented policy fallback available.', native=out.splitlines())
+
+    def _service_type(self, service):
+        _, out, _ = self._run(['sc.exe', 'qc', service])
+        match = re.search(r'START_TYPE\s+:\s+\S+\s+(\w+)', out, re.I)
+        return 'auto' if match and match.group(1).lower() in ('auto_start', 'automatic') else 'demand'
+
+    def apply_update_control(self):
+        blocked = self._admin_required()
+        if blocked:
+            return blocked
+        try:
+            self._backup('updates', {'service_type': self._service_type('wuauserv'), 'values': {
+                'NoAutoRebootWithLoggedOnUsers': self._read_dword(self.POLICY_PATH, 'NoAutoRebootWithLoggedOnUsers'),
+                'RebootWarningTimeout': self._read_dword(self.POLICY_PATH, 'RebootWarningTimeout'),
+                'ActiveHoursStart': self._read_dword(self.SETTINGS_PATH, 'ActiveHoursStart'),
+                'ActiveHoursEnd': self._read_dword(self.SETTINGS_PATH, 'ActiveHoursEnd')}})
+            rc, out, err = self._run(['sc.exe', 'config', 'wuauserv', 'start=', 'demand'])
+            if rc != 0:
+                return self._status('error', err or out)
+            rc, out, err = self._ps("New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU' -Force | Out-Null; New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU' -Name NoAutoRebootWithLoggedOnUsers -PropertyType DWord -Value 1 -Force | Out-Null; New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU' -Name RebootWarningTimeout -PropertyType DWord -Value 30 -Force | Out-Null; New-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\WindowsUpdate\\UX\\Settings' -Force | Out-Null; New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\WindowsUpdate\\UX\\Settings' -Name ActiveHoursStart -PropertyType DWord -Value 8 -Force | Out-Null; New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\WindowsUpdate\\UX\\Settings' -Name ActiveHoursEnd -PropertyType DWord -Value 18 -Force | Out-Null")
+            if rc != 0:
+                return self._status('error', err or out)
+            logger.info('Update control applied; build=%s', self._system_info().get('build'))
+            return self._status('applied', 'Manual checking/install remain available; automatic restart is deferred.')
+        except Exception as exc:
+            logger.exception('Update control apply failed')
+            return self._status('error', str(exc))
+
+    def revert_update_control(self):
+        blocked = self._admin_required()
+        if blocked:
+            return blocked
+        try:
+            self._run(['sc.exe', 'config', 'wuauserv', 'start=', self._saved('updates').get('service_type', 'auto')])
+            values = self._saved('updates').get('values', {})
+            self._restore_dword(self.POLICY_PATH, 'NoAutoRebootWithLoggedOnUsers', values.get('NoAutoRebootWithLoggedOnUsers'))
+            self._restore_dword(self.POLICY_PATH, 'RebootWarningTimeout', values.get('RebootWarningTimeout'))
+            self._restore_dword(self.SETTINGS_PATH, 'ActiveHoursStart', values.get('ActiveHoursStart'))
+            self._restore_dword(self.SETTINGS_PATH, 'ActiveHoursEnd', values.get('ActiveHoursEnd'))
+            logger.info('Update control reverted')
+            return self._status('reverted', 'Windows Update service and policy were restored.')
+        except Exception as exc:
+            logger.exception('Update control revert failed')
+            return self._status('error', str(exc))
+
+    def check_updates(self):
+        if not self._windows_available():
+            return self._status('unsupported', 'Only Windows is supported.')
+        try:
+            os.system('start ms-settings:windowsupdate')
+            logger.info('Opened native Windows Update settings for manual checking')
+            return self._status('available', 'Native Windows Update settings opened; the user controls the scan.')
+        except Exception as exc:
+            logger.exception('Could not open Windows Update settings')
+            return self._status('error', str(exc))
+
+    def install_updates(self):
+        if not self._windows_available():
+            return self._status('unsupported', 'Only Windows is supported.')
+        try:
+            os.system('start ms-settings:windowsupdate')
+            logger.info('Opened native Windows Update settings for manual installation')
+            return self._status('available', 'Native Windows Update settings opened; install is user-controlled.')
+        except Exception as exc:
+            logger.exception('Could not open Windows Update settings')
+            return self._status('error', str(exc))
+
+
+class RecallSnapshotManager(_PrivacyModule):
+    name = 'Recall snapshot protection'
+    POLICY_PATH = r'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI'
+
+    def detect(self):
+        if not self._windows_available():
+            return self._status('unsupported', 'Only Windows is supported.')
+        rc, out, _ = self._ps("Get-WindowsOptionalFeature -Online -FeatureName Recall -ErrorAction SilentlyContinue | ConvertTo-Json -Compress")
+        rc2, policy, _ = self._ps("if (Test-Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsAI') {'policy'}")
+        feature_state = None
+        try:
+            feature_state = (json.loads(out) if out else {}).get('State')
+        except Exception:
+            pass
+        exists = bool(out) or bool(policy)
+        return self._status('available' if exists else 'not_applicable', 'Recall capability detected.' if exists else 'Recall is not present on this system.', feature=out, feature_state=feature_state)
+
+    def apply_recall_control(self):
+        blocked = self._admin_required()
+        if blocked:
+            return blocked
+        detection = self.detect()
+        if detection['status'] == 'not_applicable':
+            return detection
+        try:
+            self._backup('recall', {
+                'DisableAIDataAnalysis': self._read_dword(self.POLICY_PATH, 'DisableAIDataAnalysis'),
+                'feature_state': detection.get('feature_state')
+            })
+            rc, out, err = self._ps('Disable-WindowsOptionalFeature -Online -FeatureName Recall -NoRestart -ErrorAction SilentlyContinue')
+            if rc != 0:
+                rc, out, err = self._ps("New-Item -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsAI' -Force | Out-Null; New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsAI' -Name DisableAIDataAnalysis -PropertyType DWord -Value 1 -Force | Out-Null")
+            if rc != 0:
+                return self._status('error', err or out)
+            self._backup('recall', {'changed': True})
+            logger.info('Recall protection applied')
+            return self._status('applied', 'Recall snapshots disabled; restart may be required.')
+        except Exception as exc:
+            logger.exception('Recall apply failed')
+            return self._status('error', str(exc))
+
+    def revert_recall_control(self):
+        blocked = self._admin_required()
+        if blocked:
+            return blocked
+        try:
+            saved = self._saved('recall')
+            if 'feature_state' not in saved:
+                logger.warning('Recall revert skipped feature state: backup is missing feature_state')
+                self._restore_dword(self.POLICY_PATH, 'DisableAIDataAnalysis', saved.get('DisableAIDataAnalysis'))
+                return self._status('warning', 'Backup lacks the original Recall feature state; feature state was left unchanged.')
+            if str(saved.get('feature_state', '')).lower() == 'enabled':
+                self._ps("Enable-WindowsOptionalFeature -Online -FeatureName Recall -NoRestart -ErrorAction SilentlyContinue")
+            self._restore_dword(self.POLICY_PATH, 'DisableAIDataAnalysis', saved.get('DisableAIDataAnalysis'))
+            logger.info('Recall protection reverted')
+            return self._status('reverted', 'Recall feature was restored to its saved state and policy restored.')
+        except Exception as exc:
+            logger.exception('Recall revert failed')
+            return self._status('error', str(exc))
+
+
+class TelemetryManager(_PrivacyModule):
+    name = 'Telemetry control'
+    POLICY_PATH = r'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'
+
+    def __init__(self, parent=None, amd_support=True, allow_hosts=False):
+        super().__init__(parent)
+        self.auditor = ShadowGateAuditor(parent, amd_support=amd_support)
+        self.allow_hosts = allow_hosts
+
+    def apply_telemetry_control(self):
+        blocked = self._admin_required()
+        if blocked:
+            return blocked
+        try:
+            if self.allow_hosts and not hasattr(self.auditor, '_update_hosts'):
+                logger.error('Hosts opt-in unavailable: ShadowGateAuditor has no _update_hosts method')
+                return self._status('not_applicable', 'This version does not support hosts sinkhole changes.')
+            self._backup('telemetry', {'service_type': self._service_type(), 'AllowTelemetry': self._read_dword(self.POLICY_PATH, 'AllowTelemetry')})
+            self._run(['sc.exe', 'config', 'DiagTrack', 'start=', 'demand'])
+            self._run(['reg.exe', 'add', r'HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection', '/v', 'AllowTelemetry', '/t', 'REG_DWORD', '/d', '1', '/f'])
+            if self.allow_hosts:
+                hosts_result = self.auditor._update_hosts()
+                if hosts_result.get('status') in ('error', 'unsupported', 'no_admin'):
+                    return self._status('error', 'Hosts opt-in could not be applied; telemetry changes were not rolled back.')
+            logger.info('Telemetry control applied; hosts opt-in=%s', self.allow_hosts)
+            return self._status('applied', 'DiagTrack is manual and telemetry is set to Basic.')
+        except Exception as exc:
+            logger.exception('Telemetry apply failed')
+            return self._status('error', str(exc))
+
+    def revert_telemetry_control(self):
+        blocked = self._admin_required()
+        if blocked:
+            return blocked
+        try:
+            self._run(['sc.exe', 'config', 'DiagTrack', 'start=', self._saved('telemetry').get('service_type', 'auto')])
+            self._restore_dword(self.POLICY_PATH, 'AllowTelemetry', self._saved('telemetry').get('AllowTelemetry'))
+            if self.allow_hosts:
+                if not hasattr(self.auditor, '_rollback_hosts'):
+                    logger.error('Hosts revert unavailable: ShadowGateAuditor has no _rollback_hosts method')
+                    return self._status('not_applicable', 'This version does not support hosts sinkhole rollback.')
+                hosts_result = self.auditor._rollback_hosts()
+                if hosts_result.get('status') in ('error', 'unsupported', 'no_admin'):
+                    return self._status('error', 'Hosts sinkhole rollback could not be completed.')
+            logger.info('Telemetry control reverted')
+            return self._status('reverted', 'DiagTrack, telemetry policy, and opted-in hosts entries restored.')
+        except Exception as exc:
+            logger.exception('Telemetry revert failed')
+            return self._status('error', str(exc))
+
+    def _service_type(self):
+        _, out, _ = self._run(['sc.exe', 'qc', 'DiagTrack'])
+        return 'auto' if re.search(r'START_TYPE\s+:\s+\S+\s+(AUTO_START|Automatic)', out, re.I) else 'demand'
+
+    def detect(self):
+        return self._status('available' if self._windows_available() else 'unsupported', 'DiagTrack and AllowTelemetry are documented controls.')
+
+
+class AccountSetupHelper(_PrivacyModule):
+    name = 'Local account setup'
+
+    def apply_account_setup(self):
+        if not self._windows_available():
+            return self._status('unsupported', 'Only Windows is supported.')
+        try:
+            os.startfile('ms-cxh:localonly')
+            logger.info('Opened official local account setup')
+            return self._status('available', 'Official Microsoft local-account setup opened; no bypass was performed.')
+        except Exception as exc:
+            logger.exception('Account setup failed')
+            return self._status('error', str(exc))
+
+    def revert_account_setup(self):
+        return self._status('reverted' if self._windows_available() else 'unsupported', 'This helper makes no persistent system change.')
+
+
+class BloatwareManager(_PrivacyModule):
+    name = 'Optional app removal'
+    EXCLUDED = (
+        'Microsoft.WindowsStore', 'Microsoft.WindowsDefender', 'Microsoft.SecHealthUI',
+        'Microsoft.DesktopAppInstaller', 'Microsoft.Windows.ShellExperienceHost',
+        'Microsoft.Windows.StartMenuExperienceHost',
+        'Microsoft.VCLibs.140.00', 'Microsoft.WindowsAppRuntime', 'Microsoft.UI.Xaml',
+        'Microsoft.NET.Native.Framework', 'Microsoft.NET.Native.Runtime', 'Microsoft.Windows.Photos',
+        'Microsoft.Windows.CapturePicker', 'Microsoft.Windows.NarratorQuickStart',
+        'Microsoft.AAD.BrokerPlugin', 'Microsoft.LockApp', 'Microsoft.Windows.CloudExperienceHost'
+    )
+
+    def _is_excluded(self, package_name):
+        normalized = (package_name or '').lower()
+        return any(normalized.startswith(prefix.lower()) for prefix in self.EXCLUDED)
+
+    def list_packages(self):
+        if not self._windows_available():
+            return self._status('unsupported', 'Only Windows is supported.')
+        rc, out, err = self._ps('Get-AppxPackage | Select-Object Name,PackageFullName,InstallLocation | ConvertTo-Json -Compress')
+        if rc != 0:
+            return self._status('error', err or out)
+        try:
+            packages = json.loads(out) if out else []
+            if isinstance(packages, dict):
+                packages = [packages]
+            packages = [p for p in packages if not self._is_excluded(p.get('Name'))]
+            return self._status('available', 'No package is selected automatically.', packages=packages)
+        except Exception as exc:
+            logger.exception('AppX list parsing failed')
+            return self._status('error', str(exc))
+
+    def apply_bloatware_removal(self, package_names):
+        blocked = self._admin_required()
+        if blocked:
+            return blocked
+        if not package_names:
+            return self._status('not_applicable', 'No package selected.')
+        try:
+            available = self.list_packages().get('packages', [])
+            selected = [p for p in available if p.get('Name') in package_names]
+            self._backup('appx', {'packages': selected})
+            for package in selected:
+                self._ps(f"Remove-AppxPackage -Package '{package.get('PackageFullName')}' -ErrorAction Stop")
+            logger.info('Explicitly selected AppX packages removed: %s', package_names)
+            return self._status('applied', 'Selected packages removed for the current user.')
+        except Exception as exc:
+            logger.exception('AppX removal failed')
+            return self._status('error', str(exc))
+
+    def revert_bloatware_removal(self):
+        blocked = self._admin_required()
+        if blocked:
+            return blocked
+        restored = 0
+        for package in self._saved('appx').get('packages', []):
+            manifest = Path(package.get('InstallLocation', '')) / 'AppxManifest.xml'
+            if manifest.exists() and self._ps(f"Add-AppxPackage -Register '{manifest}' -DisableDevelopmentMode")[0] == 0:
+                restored += 1
+        logger.info('AppX restore attempted; restored=%s', restored)
+        return self._status('reverted', f'{restored} package manifest(s) restored; unavailable sources were skipped.')
+
+
 class ForzeOSMarket(tk.Toplevel):
     """Application Store + Developer Editor Toplevel.
 
@@ -826,6 +1086,165 @@ class ForzeOSMarket(tk.Toplevel):
         self.dev_tab = ttk.Frame(right)
         right.add(self.dev_tab, text='Developer')
         self._build_dev_tab(self.dev_tab)
+
+        # Windows Privacy and Control Center
+        self.privacy_tab = ttk.Frame(right)
+        right.add(self.privacy_tab, text='Windows Privacy')
+        self._build_privacy_tab(self.privacy_tab)
+
+    def _build_privacy_tab(self, parent):
+        self._privacy_managers = {
+            'updates': UpdateControlManager(self),
+            'recall': RecallSnapshotManager(self),
+            'telemetry': TelemetryManager(self, allow_hosts=False),
+            'account': AccountSetupHelper(self),
+            'appx': BloatwareManager(self),
+        }
+        self._privacy_status_labels = {}
+        self._privacy_controls = {}
+        outer = ttk.Frame(parent)
+        outer.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scroll = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        body = ttk.Frame(canvas)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        canvas.create_window((0, 0), window=body, anchor='nw')
+        body.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+
+        cards = [
+            ('updates', 'Update Control', 'updates'),
+            ('recall', 'Recall Snapshot Protection', 'recall'),
+            ('telemetry', 'Telemetry Control', 'telemetry'),
+            ('account', 'Local Account Setup', 'account'),
+            ('appx', 'Optional App Removal', 'appx'),
+        ]
+        for row, (key, title, kind) in enumerate(cards):
+            card = ttk.LabelFrame(body, text=title, padding=6)
+            card.grid(row=row, column=0, sticky='ew', padx=4, pady=4)
+            body.columnconfigure(0, weight=1)
+            status = ttk.Label(card, text='Checking...')
+            status.grid(row=0, column=0, columnspan=4, sticky='w', pady=(0, 4))
+            self._privacy_status_labels[key] = status
+            controls = []
+            if key == 'updates':
+                apply_cmd = lambda: self._privacy_action('updates', 'apply_update_control')
+                revert_cmd = lambda: self._privacy_action('updates', 'revert_update_control')
+                check_button = ttk.Button(card, text='Check Updates', command=lambda: self._privacy_action('updates', 'check_updates'))
+                install_button = ttk.Button(card, text='Install Now', command=lambda: self._privacy_action('updates', 'install_updates'))
+                check_button.grid(row=1, column=0, padx=2)
+                install_button.grid(row=1, column=1, padx=2)
+                controls.extend((check_button, install_button))
+            elif key == 'recall':
+                apply_cmd = lambda: self._privacy_action('recall', 'apply_recall_control')
+                revert_cmd = lambda: self._privacy_action('recall', 'revert_recall_control')
+            elif key == 'telemetry':
+                self._privacy_hosts_var = tk.BooleanVar(value=False)
+                hosts_check = ttk.Checkbutton(card, text='Opt in to hosts sinkhole changes', variable=self._privacy_hosts_var)
+                hosts_check.grid(row=1, column=0, columnspan=2, sticky='w')
+                controls.append(hosts_check)
+                apply_cmd = lambda: self._privacy_action('telemetry', 'apply_telemetry_control', self._set_hosts_opt_in())
+                revert_cmd = lambda: self._privacy_action('telemetry', 'revert_telemetry_control')
+            elif key == 'account':
+                apply_cmd = lambda: self._privacy_action('account', 'apply_account_setup')
+                revert_cmd = lambda: self._privacy_action('account', 'revert_account_setup')
+            else:
+                ttk.Label(card, text='Select packages below; nothing is selected automatically.').grid(row=1, column=0, columnspan=4, sticky='w')
+                self._appx_vars = {}
+                list_button = ttk.Button(card, text='List Apps', command=self._refresh_appx_choices)
+                list_button.grid(row=2, column=0, padx=2, pady=2)
+                controls.append(list_button)
+                apply_cmd = lambda: self._privacy_action('appx', 'apply_bloatware_removal', [n for n, v in self._appx_vars.items() if v.get()])
+                revert_cmd = lambda: self._privacy_action('appx', 'revert_bloatware_removal')
+            ttk.Button(card, text='Apply', command=apply_cmd).grid(row=3, column=2, padx=2, pady=2, sticky='e')
+            ttk.Button(card, text='Revert', command=revert_cmd).grid(row=3, column=3, padx=2, pady=2, sticky='e')
+            controls.extend(card.grid_slaves(row=3))
+            self._privacy_controls[key] = controls
+        self._privacy_refresh_all()
+
+    def _set_hosts_opt_in(self):
+        value = bool(getattr(self, '_privacy_hosts_var', tk.BooleanVar(value=False)).get())
+        self._privacy_managers['telemetry'].allow_hosts = value
+        return None
+
+    def _privacy_action(self, key, method, argument=None):
+        manager = self._privacy_managers[key]
+        label = manager.name
+        if method.startswith('apply_') and not messagebox.askyesno(label, 'Apply this reversible change? An administrator prompt may appear.'):
+            return
+        if method.startswith('revert_') and not messagebox.askyesno(label, 'Revert the saved change?'):
+            return
+        self._privacy_set_busy(key, True)
+
+        def worker():
+            try:
+                result = getattr(manager, method)(argument) if argument is not None else getattr(manager, method)()
+            except Exception as exc:
+                logger.exception('Privacy UI action failed: %s', method)
+                result = {'status': 'error', 'message': str(exc)}
+            try:
+                self.after(0, lambda: self._privacy_finish_action(key, result))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name=f'forze-privacy-{key}').start()
+
+    def _privacy_set_busy(self, key, busy):
+        label = self._privacy_status_labels.get(key)
+        if label and busy:
+            label.configure(text='Working...')
+        for control in self._privacy_controls.get(key, []):
+            try:
+                control.configure(state=tk.DISABLED if busy else tk.NORMAL)
+            except Exception:
+                pass
+
+    def _privacy_finish_action(self, key, result):
+        self._privacy_set_busy(key, False)
+        self._privacy_set_status(key, result)
+
+    def _privacy_set_status(self, key, result):
+        status = (result or {}).get('status', 'unknown')
+        message = (result or {}).get('message', '')
+        text = f'{status}: {message}' if message else status
+        label = self._privacy_status_labels.get(key)
+        if label:
+            label.configure(text=text)
+            label.configure(foreground='#888888' if status in ('unsupported', 'not_applicable') else '')
+
+    def _privacy_refresh_all(self):
+        for key in self._privacy_managers:
+            self._privacy_set_busy(key, True)
+        for key, manager in self._privacy_managers.items():
+            def worker(current_key=key, current_manager=manager):
+                try:
+                    result = current_manager.detect() if hasattr(current_manager, 'detect') else current_manager.list_packages()
+                except Exception as exc:
+                    logger.exception('Privacy status check failed: %s', current_key)
+                    result = {'status': 'error', 'message': str(exc)}
+                try:
+                    self.after(0, lambda: self._privacy_finish_action(current_key, result))
+                except Exception:
+                    pass
+            threading.Thread(target=worker, daemon=True, name=f'forze-privacy-detect-{key}').start()
+
+    def _refresh_appx_choices(self):
+        result = self._privacy_managers['appx'].list_packages()
+        self._privacy_set_status('appx', result)
+        label = self._privacy_status_labels['appx']
+        parent = label.master
+        for widget in list(parent.grid_slaves()):
+            info = widget.grid_info()
+            if int(info.get('row', 0)) >= 4:
+                widget.destroy()
+        self._appx_vars.clear()
+        for row, package in enumerate(result.get('packages', [])[:80], start=4):
+            name = package.get('Name') or package.get('PackageFullName')
+            if name:
+                var = tk.BooleanVar(value=False)
+                self._appx_vars[name] = var
+                ttk.Checkbutton(parent, text=name, variable=var).grid(row=row, column=0, columnspan=4, sticky='w')
 
     def _build_dev_tab(self, parent):
         # Toolbar: use a horizontally scrollable toolbar so buttons never overflow
@@ -1581,6 +2000,13 @@ class ForzeOSMarket(tk.Toplevel):
             
     def _on_unmap(self, event=None):
         """Handle window hiding"""
+        if event is not None and event.widget is not self:
+            return
+        try:
+            if str(self.wm_state()) != 'iconic':
+                return
+        except Exception:
+            pass
         # Notify host the window was hidden/unmapped and mark as minimized so
         # the taskbar state remains consistent (button stays visible).
         if self.forze:
