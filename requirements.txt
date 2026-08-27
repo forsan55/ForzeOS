@@ -1,12 +1,15 @@
 ﻿tkinterweb
 PyQt5
+debugpy
 pywebview
 psutil
 requests
 pygame
+bcrypt
 pygame-ce 
 python-vlc
 moviepy
+cryptography.fernet
 pymupdf
 Pillow
 matplotlib
@@ -18,3 +21,4 @@ PyAudio
 cryptography
 comtypes
 pywin32
+platform
