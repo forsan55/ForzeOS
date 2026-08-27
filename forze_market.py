@@ -866,6 +866,12 @@ class BloatwareManager(_PrivacyModule):
         'Microsoft.AAD.BrokerPlugin', 'Microsoft.LockApp', 'Microsoft.Windows.CloudExperienceHost'
     )
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._packages_cache = None
+        self._packages_cache_time = 0.0
+        self._packages_cache_ttl = 45.0
+
     def _is_excluded(self, package_name):
         normalized = (package_name or '').lower()
         return any(normalized.startswith(prefix.lower()) for prefix in self.EXCLUDED)
@@ -873,6 +879,9 @@ class BloatwareManager(_PrivacyModule):
     def list_packages(self):
         if not self._windows_available():
             return self._status('unsupported', 'Only Windows is supported.')
+        if (self._packages_cache is not None and
+                time.monotonic() - self._packages_cache_time < self._packages_cache_ttl):
+            return self._packages_cache
         rc, out, err = self._ps('Get-AppxPackage | Select-Object Name,PackageFullName,InstallLocation | ConvertTo-Json -Compress')
         if rc != 0:
             return self._status('error', err or out)
@@ -881,7 +890,10 @@ class BloatwareManager(_PrivacyModule):
             if isinstance(packages, dict):
                 packages = [packages]
             packages = [p for p in packages if not self._is_excluded(p.get('Name'))]
-            return self._status('available', 'No package is selected automatically.', packages=packages)
+            result = self._status('available', 'No package is selected automatically.', packages=packages)
+            self._packages_cache = result
+            self._packages_cache_time = time.monotonic()
+            return result
         except Exception as exc:
             logger.exception('AppX list parsing failed')
             return self._status('error', str(exc))
@@ -1102,6 +1114,7 @@ class ForzeOSMarket(tk.Toplevel):
         }
         self._privacy_status_labels = {}
         self._privacy_controls = {}
+        self._appx_refresh_generation = 0
         outer = ttk.Frame(parent)
         outer.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
         canvas = tk.Canvas(outer, highlightthickness=0)
@@ -1230,7 +1243,28 @@ class ForzeOSMarket(tk.Toplevel):
             threading.Thread(target=worker, daemon=True, name=f'forze-privacy-detect-{key}').start()
 
     def _refresh_appx_choices(self):
-        result = self._privacy_managers['appx'].list_packages()
+        self._appx_refresh_generation += 1
+        generation = self._appx_refresh_generation
+        self._privacy_set_busy('appx', True)
+        manager = self._privacy_managers['appx']
+
+        def worker():
+            try:
+                result = manager.list_packages()
+            except Exception as exc:
+                logger.exception('AppX list refresh failed')
+                result = {'status': 'error', 'message': str(exc), 'packages': []}
+            try:
+                self.after(0, lambda: self._render_appx_choices(result, generation))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name='forze-privacy-appx-list').start()
+
+    def _render_appx_choices(self, result, generation):
+        if generation != self._appx_refresh_generation:
+            return
+        self._privacy_set_busy('appx', False)
         self._privacy_set_status('appx', result)
         label = self._privacy_status_labels['appx']
         parent = label.master
@@ -1239,12 +1273,24 @@ class ForzeOSMarket(tk.Toplevel):
             if int(info.get('row', 0)) >= 4:
                 widget.destroy()
         self._appx_vars.clear()
-        for row, package in enumerate(result.get('packages', [])[:80], start=4):
-            name = package.get('Name') or package.get('PackageFullName')
-            if name:
-                var = tk.BooleanVar(value=False)
-                self._appx_vars[name] = var
-                ttk.Checkbutton(parent, text=name, variable=var).grid(row=row, column=0, columnspan=4, sticky='w')
+        packages = result.get('packages', [])[:80] if result.get('status') != 'error' else []
+        chunk_size = 20
+
+        def render_chunk(start):
+            if generation != self._appx_refresh_generation:
+                return
+            for row, package in enumerate(packages[start:start + chunk_size], start=start + 4):
+                name = package.get('Name') or package.get('PackageFullName')
+                if name:
+                    var = tk.BooleanVar(value=False)
+                    self._appx_vars[name] = var
+                    ttk.Checkbutton(parent, text=name, variable=var).grid(
+                        row=row, column=0, columnspan=4, sticky='w')
+            next_start = start + chunk_size
+            if next_start < len(packages):
+                self.after_idle(lambda: render_chunk(next_start))
+
+        render_chunk(0)
 
     def _build_dev_tab(self, parent):
         # Toolbar: use a horizontally scrollable toolbar so buttons never overflow
