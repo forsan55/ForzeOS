@@ -1103,6 +1103,7 @@ class ForzeOSMarket(tk.Toplevel):
         self.privacy_tab = ttk.Frame(right)
         right.add(self.privacy_tab, text='Windows Privacy')
         self._build_privacy_tab(self.privacy_tab)
+        right.bind('<<NotebookTabChanged>>', lambda e: self._unbind_privacy_mousewheel())
 
     def _build_privacy_tab(self, parent):
         self._privacy_managers = {
@@ -1125,6 +1126,30 @@ class ForzeOSMarket(tk.Toplevel):
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         canvas.create_window((0, 0), window=body, anchor='nw')
         body.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+
+        def _on_mousewheel(event):
+            delta = event.delta or 0
+            canvas.yview_scroll(int(-1 * delta / 120) or (-1 if delta > 0 else 1), 'units')
+
+        def _on_linux_scroll(event):
+            canvas.yview_scroll(-3 if event.num == 4 else 3, 'units')
+
+        def _bind_mousewheel(event=None):
+            canvas.bind_all('<MouseWheel>', _on_mousewheel)
+            canvas.bind_all('<Button-4>', _on_linux_scroll)
+            canvas.bind_all('<Button-5>', _on_linux_scroll)
+
+        def _unbind_mousewheel(event=None):
+            canvas.unbind_all('<MouseWheel>')
+            canvas.unbind_all('<Button-4>')
+            canvas.unbind_all('<Button-5>')
+
+        self._privacy_canvas = canvas
+        self._unbind_privacy_mousewheel = _unbind_mousewheel
+        canvas.bind('<Enter>', _bind_mousewheel)
+        canvas.bind('<Leave>', _unbind_mousewheel)
+        canvas.bind('<Button-4>', lambda event: canvas.yview_scroll(-3, 'units'))
+        canvas.bind('<Button-5>', lambda event: canvas.yview_scroll(3, 'units'))
 
         cards = [
             ('updates', 'Update Control', 'updates'),
@@ -2073,6 +2098,10 @@ class ForzeOSMarket(tk.Toplevel):
         """Handle window closing"""
         try:
             logger.debug("ForzeOSMarket._on_close: closing window")
+            try:
+                self._unbind_privacy_mousewheel()
+            except Exception:
+                pass
             # Unregister from ForzeOS if needed
             if self.forze and hasattr(self.forze, 'unregister_window'):
                 self.forze.unregister_window(self)
