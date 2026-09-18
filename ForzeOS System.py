@@ -23,12 +23,13 @@ Update ideas by - RRaings
 Now updated with:
  - Real Web Browser functionality
  - PDF Reader using PyMuPDF
+ - New market program with intel/amd security updates
  - Video Player with VLC
  - Video Editor with MoviePy
  - Audio Recorder with sounddevice and soundfile
  - Gallery with PIL support
  - Music Player with pygame
- - Password Manager with AES encryptionf
+ - Password Manager with AES encryption
  - File encryption/decryption
  - Network scanner
  - Chess advanced
@@ -174,6 +175,23 @@ try:
 except Exception:
     pass
 
+_FORZEOS__orig_destroy = getattr(_tk.Misc, 'destroy', None)
+def _forzeos_destroy(self):
+    try:
+        if _FORZEOS__orig_destroy is not None:
+            return _FORZEOS__orig_destroy(self)
+    except Exception:
+        # Tk can report a stale Tcl command while the interpreter is already
+        # tearing down. Destruction is best-effort at this stage.
+        return None
+    return None
+
+try:
+    if _FORZEOS__orig_destroy is not None:
+        _tk.Misc.destroy = _forzeos_destroy
+except Exception:
+    pass
+
 def forzeos_cancel_all_for_widget(widget):
     ids = list(_FORZEOS_AFTER_REGISTRY.get(widget, ()))
     for aid in ids:
@@ -246,6 +264,34 @@ try:
         sys.path.insert(0, script_dir)
 except Exception:
     pass
+
+BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd())
+
+
+def resolve_asset_path(path_value):
+    """Resolve a config path relative to the ForzeOS project directory."""
+    if not path_value:
+        return path_value
+    try:
+        path = Path(path_value)
+        if path.is_absolute():
+            return str(path)
+        return str((BASE_DIR / path).resolve())
+    except (TypeError, ValueError, OSError):
+        return path_value
+
+
+def serialize_asset_path(path_value):
+    """Keep project-owned absolute paths portable when writing config."""
+    if not path_value:
+        return path_value
+    try:
+        path = Path(path_value)
+        if not path.is_absolute():
+            return str(path)
+        return path.relative_to(BASE_DIR).as_posix()
+    except (TypeError, ValueError, OSError):
+        return path_value
 
 try:
     import forzeos_core
@@ -1173,18 +1219,14 @@ except Exception:
     BCRYPT_AVAILABLE = False
 
 def hash_password(p: str) -> str:
-    """Return a bcrypt hash if possible, otherwise md5 hex (legacy).
-
-    New passwords will prefer bcrypt. Existing md5 hashes remain valid and
-    will be transparently upgraded on successful login.
-    """
+    """Return a bcrypt hash; legacy MD5 is verification-only."""
+    if not BCRYPT_AVAILABLE:
+        raise RuntimeError('bcrypt is required to create or change passwords')
     try:
-        if BCRYPT_AVAILABLE:
-            return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
+        return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
     except Exception:
         logger.exception("bcrypt hashing failed")
-    # fallback (legacy): md5 hex
-    return hashlib.md5(p.encode()).hexdigest()
+        raise
 
 def verify_password(p: str, h: str) -> bool:
     """Verify a password against stored hash `h`.
@@ -3870,6 +3912,7 @@ class ForzeOS:
                     except Exception:
                         pass
 
+                market_path = resolve_asset_path(market_path)
                 if market_path and os.path.exists(market_path):
                     # register in runtime mapping used by many helpers
                     try:
@@ -3909,7 +3952,7 @@ class ForzeOS:
                                 # Prefer opening Market in-process via host.open_market so it
                                 # creates its own Toplevel and requests a taskbar button on map.
                                 cmd = getattr(self, 'open_market', None) or market_path
-                                self.create_desktop_icon('ForzeOS Market', cmd, px, py, width=getattr(self, 'icon_size', 48), height=getattr(self, 'icon_size', 48), icon_path=self.config.get('desktop', {}).get('custom_icons', {}).get('ForzeOS Market'))
+                                self.create_desktop_icon('ForzeOS Market', cmd, px, py, width=getattr(self, 'icon_size', 48), height=getattr(self, 'icon_size', 48), icon_path=getattr(self, 'custom_icons', {}).get('ForzeOS Market'))
                         except Exception:
                             pass
                     except Exception:
@@ -4016,7 +4059,7 @@ class ForzeOS:
         except Exception:
             # fallback to original behavior on any error
             try:
-                self.show_login()
+                self._show_auth_screen()
             except Exception:
                 pass
         
@@ -4195,6 +4238,15 @@ class ForzeOS:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     self.config = json.load(f)
 
+                if 'settings' not in self.config or not isinstance(self.config['settings'], dict):
+                    self.config['settings'] = {}
+                try:
+                    self.config['settings']['wallpaper_image'] = resolve_asset_path(
+                        self.config['settings'].get('wallpaper_image')
+                    )
+                except Exception:
+                    pass
+
                 # Desktop ayarlarını yükle
                 if 'desktop' in self.config:
                     # load per-desktop positions if present
@@ -4203,16 +4255,23 @@ class ForzeOS:
                         self.icon_positions = self.desktop_icon_positions.get(str(self.current_desktop_index), {}) or {}
                     except Exception:
                         self.icon_positions = self.config['desktop'].get('icon_positions', {})
-                    self.custom_icons = self.config['desktop'].get('custom_icons', {})
+                    raw_custom_icons = self.config['desktop'].get('custom_icons', {}) or {}
+                    self.custom_icons = {
+                        key: resolve_asset_path(value) for key, value in raw_custom_icons.items()
+                    } if isinstance(raw_custom_icons, dict) else {}
                     # Load custom apps (added by dragging .py to desktop)
-                    self.custom_apps = self.config['desktop'].get('custom_apps', {})
+                    raw_custom_apps = self.config['desktop'].get('custom_apps', {}) or {}
+                    self.custom_apps = {
+                        key: resolve_asset_path(value) for key, value in raw_custom_apps.items()
+                    } if isinstance(raw_custom_apps, dict) else {}
                     # Per-desktop settings (d1, d2, ...)
                     self.desktop_settings = self.config['desktop'].get('desktop_settings', {})
                     
                     # Wallpaper ayarlarını al
                     wallpaper = self.config['desktop'].get('wallpaper', {})
-                    if wallpaper.get('image') and os.path.exists(wallpaper['image']):
-                        self.config['settings']['wallpaper_image'] = wallpaper['image']
+                    wallpaper_image = resolve_asset_path(wallpaper.get('image'))
+                    if wallpaper_image and os.path.exists(wallpaper_image):
+                        self.config['settings']['wallpaper_image'] = wallpaper_image
                     else: 
                         self.config['settings']['wallpaper_color'] = wallpaper.get('color', '#2C3E50')
                 # Load persisted icon_size if present (best-effort)
@@ -4222,10 +4281,6 @@ class ForzeOS:
                 except Exception:
                     # keep existing/default icon_size on failure
                     pass
-
-                # Ensure settings dict exists
-                if 'settings' not in self.config or not isinstance(self.config['settings'], dict):
-                    self.config['settings'] = {}
 
                 # If older configs saved 'mouse' at top-level, migrate it into settings
                 try:
@@ -4264,6 +4319,188 @@ class ForzeOS:
             print(f"Config load error: {e}")
             self.config = self.get_default_config()
             self.save_config()
+
+    def show_initial_setup(self):
+        """Show the first-run account form using the visual login surface."""
+        try:
+            from PIL import Image as PilImage, ImageTk as PilImageTk
+
+            win = tk.Toplevel(self.root)
+            self.setup_window = win
+            win.title('ForzeOS Setup')
+            win.attributes('-fullscreen', True)
+            win.configure(bg=self.colors.get('bg', '#2C3E50'))
+
+            canvas = tk.Canvas(win, highlightthickness=0, bg=self.colors.get('bg', '#2C3E50'))
+            canvas.pack(fill=tk.BOTH, expand=True)
+
+            wallpaper_path = resolve_asset_path(self.config.get('settings', {}).get('login_wallpaper'))
+            if wallpaper_path and os.path.exists(wallpaper_path):
+                wallpaper = PilImage.open(wallpaper_path).convert('RGB')
+                wallpaper = wallpaper.resize((self.screen_width, self.screen_height), PilImage.Resampling.LANCZOS)
+                win._setup_wallpaper_ref = PilImageTk.PhotoImage(wallpaper)
+                canvas.create_image(0, 0, image=win._setup_wallpaper_ref, anchor='nw')
+
+            panel_path = BASE_DIR / 'ForzeOS_LOGIN.png'
+            panel_ref = None
+            panel_width = min(620, max(460, int(self.screen_width * 0.42)))
+            if panel_path.exists():
+                panel = PilImage.open(panel_path).convert('RGBA')
+                alpha_bbox = panel.getchannel('A').getbbox()
+                if alpha_bbox:
+                    panel = panel.crop(alpha_bbox)
+                ratio = panel_width / max(1, panel.width)
+                panel = panel.resize((panel_width, max(1, int(panel.height * ratio))), PilImage.Resampling.LANCZOS)
+                panel_ref = PilImageTk.PhotoImage(panel)
+                win._setup_panel_ref = panel_ref
+                panel_x = (self.screen_width - panel.width) // 2
+                panel_y = (self.screen_height - panel.height) // 2
+                canvas.create_image(panel_x, panel_y, image=panel_ref, anchor='nw')
+            else:
+                panel_x = (self.screen_width - panel_width) // 2
+                panel_y = max(40, (self.screen_height - 620) // 2)
+
+            # Keep the form aligned to the rendered PNG. The old fixed
+            # offset drifted when the image was scaled for another resolution.
+            rendered_panel_height = panel.height if panel_ref is not None else 620
+            form_width = max(300, min(panel_width - 32, int(panel_width * 0.86)))
+            form_top = panel_y + int(rendered_panel_height * 0.31)
+            form = tk.Frame(win, bg='#3f3f3f', bd=0)
+            form.place(
+                x=panel_x + (panel_width - form_width) // 2,
+                y=form_top,
+                width=form_width,
+            )
+
+            tk.Label(form, text='Create your ForzeOS account', bg='#3f3f3f', fg='white',
+                     font=('Segoe UI', 16, 'bold')).pack(pady=(14, 4))
+            tk.Label(form, text='Choose the username and password for this computer.',
+                     bg='#3f3f3f', fg='#d7d7d7', wraplength=form_width - 30).pack(pady=(0, 12))
+
+            tk.Label(form, text='Username', anchor='w', bg='#3f3f3f', fg='white').pack(fill=tk.X, padx=24)
+            username_entry = tk.Entry(form, font=('Segoe UI', 12))
+            username_entry.pack(fill=tk.X, padx=24, pady=(3, 9))
+
+            tk.Label(form, text='Password', anchor='w', bg='#3f3f3f', fg='white').pack(fill=tk.X, padx=24)
+            password_entry = tk.Entry(form, show='*', font=('Segoe UI', 12))
+            password_entry.pack(fill=tk.X, padx=24, pady=(3, 9))
+
+            tk.Label(form, text='Confirm password', anchor='w', bg='#3f3f3f', fg='white').pack(fill=tk.X, padx=24)
+            confirm_entry = tk.Entry(form, show='*', font=('Segoe UI', 12))
+            confirm_entry.pack(fill=tk.X, padx=24, pady=(3, 12))
+            error_var = tk.StringVar(value='')
+            tk.Label(form, textvariable=error_var, bg='#3f3f3f', fg='#ff9b9b', wraplength=form_width - 30).pack(pady=(0, 5))
+
+            def finish_setup(event=None):
+                username = username_entry.get().strip()
+                password = password_entry.get()
+                confirmation = confirm_entry.get()
+                if not username:
+                    error_var.set('Username cannot be empty.')
+                    return
+                if not password:
+                    error_var.set('Password cannot be empty.')
+                    return
+                if password != confirmation:
+                    error_var.set('Passwords do not match.')
+                    return
+                try:
+                    self.config['users'] = {
+                        username: {
+                            'password': hash_password(password),
+                            'created': datetime.datetime.now().isoformat()
+                        }
+                    }
+                    self.config.setdefault('settings', {})['setup_required'] = False
+                    self.current_user = username
+                    self.save_config()
+                    win.destroy()
+                    self.show_login()
+                except Exception as exc:
+                    logger.exception('Initial account setup failed')
+                    error_var.set(f'Setup failed: {exc}')
+
+            tk.Button(form, text='Continue to login', command=finish_setup,
+                      bg=self.colors.get('accent', '#3498DB'), fg='white',
+                      font=('Segoe UI', 11, 'bold'), relief=tk.FLAT, padx=12, pady=6).pack(pady=(2, 16))
+            win.bind('<Return>', finish_setup)
+            win.bind('<Escape>', lambda event: self.shutdown_system())
+            username_entry.focus_set()
+        except Exception:
+            logger.exception('Initial setup screen failed')
+            # Never bypass account creation when setup is still required.
+            try:
+                if 'win' in locals() and win.winfo_exists():
+                    win.destroy()
+            except Exception:
+                pass
+            try:
+                if self.ensure_initial_user_setup():
+                    self.show_login()
+            except Exception:
+                logger.exception('Unable to recover initial account setup')
+
+    def _show_auth_screen(self):
+        """Open setup or login without allowing setup to be bypassed."""
+        try:
+            setup_required = bool(self.config.get('settings', {}).get('setup_required'))
+        except Exception:
+            setup_required = True
+        if setup_required:
+            self.show_initial_setup()
+        else:
+            self.show_login()
+
+    def ensure_initial_user_setup(self):
+        """Legacy compatibility wrapper for callers that still request setup."""
+        try:
+            settings = self.config.setdefault('settings', {})
+            if not settings.get('setup_required'):
+                return True
+            if not BCRYPT_AVAILABLE:
+                messagebox.showerror(
+                    'ForzeOS Setup',
+                    'bcrypt is required for the first account setup. Install requirements.txt and try again.'
+                )
+                return False
+
+            while True:
+                username = simpledialog.askstring(
+                    'ForzeOS Setup', 'Choose your username:', parent=self.root
+                )
+                if username is None:
+                    return False
+                username = username.strip()
+                if not username:
+                    messagebox.showerror('ForzeOS Setup', 'Username cannot be empty.', parent=self.root)
+                    continue
+
+                password = simpledialog.askstring(
+                    'ForzeOS Setup', 'Choose your password:', show='*', parent=self.root
+                )
+                if not password:
+                    messagebox.showerror('ForzeOS Setup', 'Password cannot be empty.', parent=self.root)
+                    continue
+                confirmation = simpledialog.askstring(
+                    'ForzeOS Setup', 'Confirm your password:', show='*', parent=self.root
+                )
+                if password != confirmation:
+                    messagebox.showerror('ForzeOS Setup', 'Passwords do not match.', parent=self.root)
+                    continue
+
+                self.config['users'] = {
+                    username: {
+                        'password': hash_password(password),
+                        'created': datetime.datetime.now().isoformat()
+                    }
+                }
+                settings['setup_required'] = False
+                self.current_user = username
+                self.save_config()
+                return True
+        except Exception:
+            logger.exception('Initial user setup failed')
+            return False
 
     def load_language(self, lang_code: str):
         """Load translations from languages/<lang_code>.json into self.translations
@@ -5382,10 +5619,16 @@ class ForzeOS:
 
             self.config['desktop'].update({
                 'icon_positions': self.icon_positions,
-                'custom_icons': self.custom_icons,
-                'custom_apps': getattr(self, 'custom_apps', {}),
+                'custom_icons': {
+                    key: serialize_asset_path(value)
+                    for key, value in (self.custom_icons or {}).items()
+                },
+                'custom_apps': {
+                    key: serialize_asset_path(value) if isinstance(value, (str, type(None))) else value
+                    for key, value in (getattr(self, 'custom_apps', {}) or {}).items()
+                },
                 'wallpaper': {
-                    'image': self.config['settings'].get('wallpaper_image'),
+                    'image': serialize_asset_path(self.config['settings'].get('wallpaper_image')),
                     'color': self.config['settings'].get('wallpaper_color', '#2C3E50')
                 }
             })
@@ -5544,7 +5787,7 @@ class ForzeOS:
         # Load logo (prefer user-configured loading_logo_image, fallback to packaged forze_logo.png)
         logo_img = None
         cfg = self.config.setdefault('settings', {})
-        user_logo = cfg.get('loading_logo_image')
+        user_logo = resolve_asset_path(cfg.get('loading_logo_image'))
         if user_logo:
             try:
                 user_logo = os.path.abspath(os.path.expanduser(user_logo))
@@ -5614,23 +5857,25 @@ class ForzeOS:
 
         # Music: prefer user-configured loading sound, fallback to packaged theme
         cfg = self.config.setdefault('settings', {})
-        music_path = cfg.get('loading_sound') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'startup_theme.mp3')
+        music_path = resolve_asset_path(cfg.get('loading_sound')) or resolve_asset_path('startup_theme.mp3')
         self._loading_music_channel = None
         self._loading_music_length = 0.0
         self._loading_music_start_time = None
-        if PYGAME_AVAILABLE and os.path.exists(music_path):
+        if PYGAME_AVAILABLE and music_path and os.path.exists(music_path):
             try:
+                mixer_state = pygame.mixer.get_init()
+                if not mixer_state:
+                    pygame.mixer.init(frequency=44100, size=-16, channels=2)
                 music_sound = pygame.mixer.Sound(music_path)
                 self._loading_music_length = float(music_sound.get_length() or 0.0)
-                self._loading_music_channel = music_sound.play()
-                if self._loading_music_channel:
-                    try:
-                        self._loading_music_channel.set_volume(0.6)
-                    except Exception:
-                        pass
+                pygame.mixer.music.load(music_path)
+                pygame.mixer.music.set_volume(0.6)
+                pygame.mixer.music.play()
                 self._loading_music_start_time = time.time()
                 self._loading_music_playing = True
+                logger.info('Loading music started: %s', music_path)
             except Exception:
+                logger.exception('Loading music could not be played: %s', music_path)
                 self._loading_music_playing = False
 
         # Starfield and birds
@@ -6092,9 +6337,9 @@ class ForzeOS:
                 except Exception:
                     pass
                 try:
-                    self.show_login()
+                    self._show_auth_screen()
                 except Exception:
-                    pass
+                    logger.exception('Unable to open setup/login screen after loading')
                 return
 
             # use slightly lower frame rate to reduce CPU/RAM churn
@@ -6231,7 +6476,7 @@ class ForzeOS:
         self.locked_until = None
 
         # Varsayılan veya kayıtlı wallpaper
-        default_wallpaper = self.config['settings'].get('login_wallpaper', None)
+        default_wallpaper = resolve_asset_path(self.config['settings'].get('login_wallpaper', None))
         wallpaper_label = tk.Label(self.login_window, bg=self.colors['bg'])
         wallpaper_label.place(x=0, y=0, relwidth=1, relheight=1)
         # No startup sound for login screen (only loading screen plays audio)
@@ -6488,7 +6733,7 @@ class ForzeOS:
         try:
             # If a wallpaper was already set before canvas creation, reapply it to canvas so it's visible
             try:
-                lp = self.config.setdefault('settings', {}).get('login_wallpaper')
+                lp = resolve_asset_path(self.config.setdefault('settings', {}).get('login_wallpaper'))
                 if lp:
                     set_wallpaper(lp)
             except Exception:
@@ -6496,7 +6741,7 @@ class ForzeOS:
 
             # Resolve panel image path: user-provided or bundled fallback
             cfg = self.config.setdefault('settings', {})
-            user_panel = cfg.get('login_panel_image')
+            user_panel = resolve_asset_path(cfg.get('login_panel_image'))
             if user_panel:
                 try:
                     user_panel = os.path.abspath(os.path.expanduser(user_panel))
@@ -6526,6 +6771,9 @@ class ForzeOS:
             else:
                 try:
                     pil = Image.open(panel_img_path).convert('RGBA')
+                    alpha_bbox = pil.getchannel('A').getbbox()
+                    if alpha_bbox:
+                        pil = pil.crop(alpha_bbox)
                 except Exception:
                     logger.exception('Failed to open panel image %s', panel_img_path)
                     _fallback_frame_login()
@@ -6670,18 +6918,25 @@ class ForzeOS:
                     cx = self.screen_width // 2
                     cy = self.screen_height // 2
 
-                # overlay entry widgets relative to panel center
+                # Position controls inside the actual panel, not the old
+                # image-canvas center offsets. This keeps them stable after
+                # cropping transparent PNG margins and scaling the panel.
                 ph = h
-                uname_y = cx and (cy - int(ph * 0.12)) or (self.screen_height//2 - int(ph * 0.12))
-                pwd_y = cy + int(ph * 0.04)
-                btns_y = cy + int(ph * 0.22)
+                panel_top = cy - (ph // 2)
+                uname_y = panel_top + int(ph * 0.57)
+                pwd_y = panel_top + int(ph * 0.69)
+                # The canvas window is centered on this coordinate, so leave
+                # a real bottom margin for the buttons instead of placing the
+                # frame against the PNG edge.
+                btns_y = panel_top + int(ph * 0.84)
 
                 entry_font = ("Segoe UI", 14)
-                entry_width_px = min(int(self.screen_width * 0.18), 520)
+                entry_width_px = min(int(w * 0.68), int(self.screen_width * 0.30), 460)
+                panel_bg = '#434343'
 
                 # Create proper Label widgets for captions (placed above their entries)
-                user_lbl = tk.Label(self.login_window, text="Kullanıcı adı:", bg=self.colors.get('dark'), fg='white', font=("Segoe UI", 12, 'bold'))
-                pwd_lbl = tk.Label(self.login_window, text="Şifre:", bg=self.colors.get('dark'), fg='white', font=("Segoe UI", 12, 'bold'))
+                user_lbl = tk.Label(self.login_window, text="Kullanıcı adı:", bg=panel_bg, fg='white', font=("Segoe UI", 12, 'bold'))
+                pwd_lbl = tk.Label(self.login_window, text="Şifre:", bg=panel_bg, fg='white', font=("Segoe UI", 12, 'bold'))
 
                 # Create entries and assign to self so other methods (self.login) can access them
                 self.username_entry = tk.Entry(self.login_window, font=entry_font, bg='white', fg='black', insertbackground='black')
@@ -6760,12 +7015,17 @@ class ForzeOS:
                 canvas_window_ids.append(eid)
 
                 # Buttons frame
-                btn_frame = tk.Frame(self.login_window, bg=self.colors.get('dark'))
+                btn_frame = tk.Frame(
+                    self.login_window,
+                    bg=panel_bg,
+                    bd=0,
+                    highlightthickness=0,
+                )
                 login_btn = tk.Button(btn_frame, text='Giriş Yap', bg=self.colors['accent'], fg='white', font=("Segoe UI", 14), width=12, command=self.login, relief=tk.FLAT, bd=0, highlightthickness=0, activebackground=self.colors.get('accent'))
                 forgot_btn = tk.Button(btn_frame, text='Şifremi Unuttum', bg=self.colors['warning'], fg='black', font=("Segoe UI", 14))
-                login_btn.pack(side='left', padx=6, pady=4)
-                forgot_btn.pack(side='left', padx=6, pady=4)
-                bf_id = self.login_canvas.create_window(cx, btns_y, window=btn_frame)
+                login_btn.pack(side='left', padx=5, pady=0)
+                forgot_btn.pack(side='left', padx=5, pady=0)
+                bf_id = self.login_canvas.create_window(cx, btns_y, window=btn_frame, anchor='center')
                 canvas_window_ids.append(bf_id)
 
                 def forgot_password():
@@ -7212,7 +7472,7 @@ class ForzeOS:
 
     def get_desktop_wallpaper(self, desktop_index):
         """Belirli masaüstünün duvar kâğıdını döndür"""
-        return self.config['settings'].get('wallpapers', {}).get(str(desktop_index), None)
+        return resolve_asset_path(self.config['settings'].get('wallpapers', {}).get(str(desktop_index), None))
     
     def add_desktop_context_menu(self):
         """Add right-click context menu to desktop"""
@@ -12796,7 +13056,7 @@ class ForzeOS:
                 self.config['wallpapers'] = {}
                 
             self.config['wallpapers'][str(self.current_desktop_index)] = {
-                'image': self.config['settings'].get('wallpaper_image'),
+                'image': serialize_asset_path(self.config['settings'].get('wallpaper_image')),
                 'color': self.config['settings'].get('wallpaper_color', '#2C3E50')
             }
 
@@ -12865,7 +13125,7 @@ class ForzeOS:
                 for k, v in list(raw_custom_apps.items()):
                     # If it's already a string (path) or None, keep it.
                     if isinstance(v, str) or v is None:
-                        safe_custom_apps[k] = v
+                        safe_custom_apps[k] = serialize_asset_path(v)
                         continue
 
                     extracted = None
@@ -12903,7 +13163,10 @@ class ForzeOS:
 
             self.config['desktop'].update({
                 'icon_positions': getattr(self, 'icon_positions', {}),
-                'custom_icons': getattr(self, 'custom_icons', {}),
+                'custom_icons': {
+                    key: serialize_asset_path(value)
+                    for key, value in (getattr(self, 'custom_icons', {}) or {}).items()
+                },
                 'custom_apps': safe_custom_apps,
                 'icon_size': getattr(self, 'icon_size', 48),
                 'wallpapers': self.config['wallpapers'],  # Duvar kağıtlarını desktop ayarlarına ekle
@@ -12948,9 +13211,15 @@ class ForzeOS:
                 except Exception:
                     self.icon_positions = self.config['desktop'].get('icon_positions', {})
 
-                self.custom_icons = self.config['desktop'].get('custom_icons', {})
+                raw_custom_icons = self.config['desktop'].get('custom_icons', {}) or {}
+                self.custom_icons = {
+                    key: resolve_asset_path(value) for key, value in raw_custom_icons.items()
+                } if isinstance(raw_custom_icons, dict) else {}
                 # legacy + persisted custom apps
-                self.custom_apps = self.config['desktop'].get('custom_apps', {})
+                raw_custom_apps = self.config['desktop'].get('custom_apps', {}) or {}
+                self.custom_apps = {
+                    key: resolve_asset_path(value) for key, value in raw_custom_apps.items()
+                } if isinstance(raw_custom_apps, dict) else {}
 
                 # Ensure desktops list has an entry for current desktop
                 try:
@@ -12976,8 +13245,8 @@ class ForzeOS:
                         try:
                             if isinstance(ent, dict):
                                 name = ent.get('name')
-                                path = ent.get('path')
-                                iconp = ent.get('icon')
+                                path = resolve_asset_path(ent.get('path'))
+                                iconp = resolve_asset_path(ent.get('icon'))
                                 # Respect user-removed icons: skip re-adding
                                 if name and name in removed_set:
                                     continue
@@ -12991,8 +13260,8 @@ class ForzeOS:
                                         self.desktops[self.current_desktop_index].append((name, cmd, iconp))
                             elif isinstance(ent, (list, tuple)) and len(ent) >= 2:
                                 name = ent[0]
-                                path = ent[1]
-                                iconp = ent[2] if len(ent) > 2 else None
+                                path = resolve_asset_path(ent[1])
+                                iconp = resolve_asset_path(ent[2] if len(ent) > 2 else None)
                                 if name:
                                     if isinstance(path, str) and path:
                                         if path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico')):
@@ -13082,7 +13351,7 @@ class ForzeOS:
                 
                 if current_desktop in wallpapers:
                     wallpaper_data = wallpapers[current_desktop]
-                    wallpaper_image = wallpaper_data.get('image')
+                    wallpaper_image = resolve_asset_path(wallpaper_data.get('image'))
                     wallpaper_color = wallpaper_data.get('color')
 
                     if wallpaper_image and os.path.exists(wallpaper_image):
@@ -13942,8 +14211,8 @@ class ForzeOS:
     def restart_system(self):
         """Restart the system"""
         if messagebox.askyesno("Restart", "Are you sure you want to restart FORZEOS?"):
-            self.root.quit()
-            self.root.destroy()
+            self._shutting_down = True
+            self._perform_shutdown()
             ForzeOS().run()
     
     def shutdown_system(self):
@@ -13951,6 +14220,10 @@ class ForzeOS:
         try:
             # Shutdown sürecini işaretle
             self._shutting_down = True
+            try:
+                forzeos_cancel_all()
+            except Exception:
+                pass
             # --- Fix: Stop all running background jobs / after calls before destroy ---
             try:
                 # Cancel all saved after() jobs if tracked
@@ -14171,11 +14444,11 @@ class ForzeOS:
             try:
                 if hasattr(self, 'root') and self.root and self.root.winfo_exists():
                     try:
-                        self.root.quit()
+                        forzeos_cancel_all()
                     except Exception:
                         pass
                     try:
-                        self.root.update()
+                        self.root.quit()
                     except Exception:
                         pass
                     try:
@@ -15737,7 +16010,7 @@ class ForzeOS:
             cfg = getattr(self, 'config', {}) or {}
             v = cfg.get('desktop', {}).get('custom_icons') or cfg.get('custom_icons')
             if isinstance(v, dict) and app_name in v:
-                return v.get(app_name)
+                return resolve_asset_path(v.get(app_name))
         except Exception:
             pass
         try:
@@ -30529,7 +30802,7 @@ Features: All Premium Applications Enabled
         try:
             new_password = simpledialog.askstring("Change Password", "Enter new password:", show='*')
             if new_password:
-                hashed = hashlib.md5(new_password.encode()).hexdigest()
+                hashed = hash_password(new_password)
                 self.config['users'][self.current_user]['password'] = hashed
                 self.save_config()
                 messagebox.showinfo("Success", "Password changed successfully!")
@@ -30552,7 +30825,7 @@ Features: All Premium Applications Enabled
             if not password:
                 return
             
-            hashed = hashlib.md5(password.encode()).hexdigest()
+            hashed = hash_password(password)
             self.config['users'][username] = {
                 'password': hashed,
                 'created': datetime.datetime.now().isoformat()
@@ -35186,5 +35459,6 @@ if __name__ == "__main__":
                 pass
         except Exception:
             pass
+
 
 

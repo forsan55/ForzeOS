@@ -1,13 +1,13 @@
 {
   "users": {
     "admin": {
-      "password": "3c2343744fb713838ee74d50cff438c7",
-      "created": "2026-03-14T15:53:26.187509"
+      "password": "$2b$12$AOTVENPDmoVbWFJtnntwneX4vz0PXFCoq.VXLMBdJxNANXZr1Ny7m",
+      "created": "2026-09-14T23:41:34.684007"
     }
   },
   "settings": {
     "wallpaper_color": null,
-    "wallpaper_image": "C:/forzeos/ForzeOS Minimalist Deseni.png",
+    "wallpaper_image": "C:\\forzeos\\ForzeOS Minimalist Deseni.png",
     "taskbar_position": "bottom",
     "minimize_to_taskbar": true,
     "auto_login": false,
@@ -15,9 +15,11 @@
     "companion_ai_personality": "Mizahi",
     "allow_desktop_shortcuts": true,
     "start_menu_items": [
-      "Aggressive Focus"
+      "Aggressive Focus",
+      "organize_assets",
+      "app"
     ],
-    "login_wallpaper": "C:/forzeos/forzeoslogin.png",
+    "login_wallpaper": "forzeoslogin.png",
     "mouse": {
       "cursor": "arrow",
       "cursor_theme": "default",
@@ -34,16 +36,21 @@
       "cursor_acceleration": 1.0,
       "profiles": []
     },
-    "resource_monitoring": true,
+    "resource_monitoring": false,
     "focus_mode_allow_unsafe": true,
     "login_panel_image": null,
     "loading_logo_image": null,
     "login_logo_image": null,
     "login_sound": null,
-    "loading_sound": "C:\\Users\\User\\Downloads\\startup_theme.mp3",
+    "loading_sound": "startup_theme.mp3",
+    "setup_required": true,
     "login_panel_scale": 1.0,
     "login_panel_anchor": "center",
-    "taskbar_color": "#2e3f23"
+    "taskbar_color": "#2e3f23",
+    "auto_arrange_windows": false,
+    "align_icons_to_grid": false,
+    "grid_w": 120,
+    "grid_h": 120
   },
   "shortcuts": {
     "File Manager": "Ctrl+Alt+F",
@@ -52,33 +59,50 @@
     "Calculator": "Ctrl+Alt+C",
     "Settings": "Ctrl+Alt+S",
     "Web Browser": "Ctrl+Alt+W",
-    "Code Editor": "Ctrl+Alt+K"
+    "Code Editor": "Ctrl+Alt+K",
+    "ForzeOS Market": "Ctrl+Alt+0"
   },
   "desktop": {
     "icon_positions": {
       "File Manager": [
-        145,
+        48,
         40
       ],
       "Video Editor": [
-        945,
-        127
+        168,
+        40
+      ],
+      "Snake Game": [
+        288,
+        40
+      ],
+      "Web Browser": [
+        408,
+        40
+      ],
+      "Social Media": [
+        528,
+        40
+      ],
+      "Video Player": [
+        166,
+        281
       ]
     },
     "custom_icons": {
-      "File Manager": "C:/forzeos/assets/icons/dosya.png",
-      "Notepad": "C:/forzeos/assets/icons/Notes.png",
-      "Calculator": "C:/forzeos/assets/icons/hesap.png",
-      "Terminal": "C:/forzeos/assets/icons/FORZE_CYBER.png",
-      "Paint": "C:/forzeos/assets/icons/icon.png",
-      "Snake Game": "C:/forzeos/assets/icons/Yuvarlak.png",
-      "Web Browser": "C:/forzeos/assets/icons/internet.png"
+      "File Manager": "assets/icons/dosya.png",
+      "Notepad": "assets/icons/Notes.png",
+      "Calculator": "assets/icons/hesap.png",
+      "Terminal": "assets/icons/FORZE_CYBER.png",
+      "Paint": "assets/icons/icon.png",
+      "Snake Game": "assets/icons/Yuvarlak.png",
+      "Web Browser": "assets/icons/internet.png"
     },
     "custom_apps": {
-      "ForzeOS Market": "d:\\forzeos\\forze_market.py"
+      "ForzeOS Market": "<bound method ForzeOS.open_market of <__main__.ForzeOS object at 0x0000023B4525BB90>>"
     },
     "wallpaper": {
-      "image": "C:/forzeos/ForzeOS Minimalist Deseni.png",
+      "image": "ForzeOS Minimalist Deseni.png",
       "color": null
     },
     "removed_icons": {},
@@ -89,29 +113,145 @@
     "desktop_icon_positions": {
       "0": {
         "File Manager": [
-          145,
+          48,
           40
         ],
         "Video Editor": [
-          945,
-          127
+          168,
+          40
+        ],
+        "Snake Game": [
+          288,
+          40
+        ],
+        "Web Browser": [
+          408,
+          40
+        ],
+        "Social Media": [
+          528,
+          40
+        ],
+        "Video Player": [
+          166,
+          281
         ]
       },
       "1": {
         "File Manager": [
-          49,
-          39
+          140,
+          20
+        ],
+        "ForzeOS Market": [
+          380,
+          260
+        ],
+        "Music Studio": [
+          500,
+          260
+        ],
+        "Music Player": [
+          500,
+          140
+        ],
+        "Password Manager": [
+          620,
+          140
+        ],
+        "File Encryption": [
+          614,
+          247
+        ],
+        "Network Scanner": [
+          740,
+          140
+        ],
+        "Tic-Tac-Toe": [
+          740,
+          260
+        ],
+        "Flappy Bird": [
+          860,
+          140
+        ],
+        "Math Tools": [
+          860,
+          260
+        ],
+        "Web Browser": [
+          980,
+          140
+        ],
+        "Snake Game": [
+          980,
+          260
+        ],
+        "Sticky Notes": [
+          1100,
+          140
+        ],
+        "Chess": [
+          1100,
+          260
+        ],
+        "Icon Manager": [
+          1100,
+          20
+        ],
+        "Settings": [
+          980,
+          20
+        ],
+        "Code Editor": [
+          860,
+          20
+        ],
+        "Paint": [
+          740,
+          20
+        ],
+        "Terminal": [
+          620,
+          20
+        ],
+        "Calculator": [
+          500,
+          20
+        ],
+        "Gallery": [
+          380,
+          140
+        ],
+        "Video Editor": [
+          380,
+          20
+        ],
+        "Notepad": [
+          260,
+          20
+        ],
+        "PDF Reader": [
+          260,
+          140
+        ],
+        "Video Player": [
+          260,
+          260
+        ],
+        "Social Media": [
+          140,
+          260
         ]
       }
     },
     "icon_size": 64,
     "wallpapers": {
       "0": {
-        "image": "C:/forzeos/ForzeOS Minimalist Deseni.png",
+        "image": "ForzeOS Minimalist Deseni.png",
         "color": null
       },
       "1": {
-        "image": "C:/forzeos/ForzeOS Minimalist Deseni.png",
+        "image": "ForzeOS Minimalist Deseni.png",
         "color": null
       }
     },
@@ -119,7 +259,7 @@
       "0": [
         {
           "name": "ForzeOS Market",
-          "path": "d:\\forzeos\\forze_market.py",
+          "path": "forze_market.py",
           "icon": null
         },
         {
@@ -250,148 +390,6 @@
         {
           "name": "Video Editor",
           "path": "",
-          "icon": null
-        }
-      ],
-      "1": [
-        {
-          "name": "File Manager",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Notepad",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Calculator",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Terminal",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Paint",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Code Editor",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Settings",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Icon Manager",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "ForzeOS Market",
-          "path": "d:\\forzeos\\forze_market.py",
-          "icon": null
-        },
-        {
-          "name": "Web Browser",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Snake Game",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Chess",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Web Browser",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "PDF Reader",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Gallery",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Music Player",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Music Studio",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Password Manager",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "File Encryption",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Network Scanner",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Tic-Tac-Toe",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Flappy Bird",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Math Tools",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Sticky Notes",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Social Media",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Video Player",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "Video Editor",
-          "path": "",
-          "icon": null
-        },
-        {
-          "name": "ForzeOS Market",
-          "path": "d:\\forzeos\\forze_market.py",
           "icon": null
         }
       ]
@@ -412,19 +410,21 @@
     },
     "companion_enabled": false,
     "companion_position": {
-      "x": 1430,
+      "x": 1420,
       "y": 708
     },
     "companion_ai_enabled": true,
-    "companion_hide_on_open": false
+    "companion_hide_on_open": false,
+    "companion_allow_move": true,
+    "companion_hidden": false
   },
   "wallpapers": {
     "0": {
-      "image": "C:/forzeos/ForzeOS Minimalist Deseni.png",
+      "image": "ForzeOS Minimalist Deseni.png",
       "color": null
     },
     "1": {
-      "image": "C:/forzeos/ForzeOS Minimalist Deseni.png",
+      "image": "ForzeOS Minimalist Deseni.png",
       "color": null
     }
   },

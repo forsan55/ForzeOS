@@ -1,16 +1,30 @@
 // forze_aggressive.cpp
 // Cleaned, transparent, high-performance Windows focus mode optimization DLL
-// - No obfuscation: all Win32 APIs called transparently
+// - No obfuscation: all Win32/NT APIs called transparently (resolved via
+//   LoadLibrary/GetProcAddress, same pattern throughout)
 // - Expanded whitelist: protects games and anti-cheat services
-// - 5 integrated performance modules:
+// - 9 integrated performance modules:
 //   1. High Precision Timer Resolution (timeBeginPeriod/timeEndPeriod)
 //   2. MMCSS "Games" Thread Registration (AvSetMmThreadCharacteristicsW)
 //   3. Dynamic Power Plan Switcher (PowerSetActiveScheme via powrprof.dll)
 //   4. GameDVR & Network Throttling Registry Fixes
 //   5. Self-Process & Heap Hardening
+//   6. Memory Optimizer (working-set trimming, whitelist-aware)
+//   7. Standby List Purge (NtSetSystemInformation / MemoryPurgeStandbyList)
+//   8. Dynamic RAM Threshold Monitor (background watcher, triggers 6+7
+//      only when memory load crosses a configurable threshold)
+//   9. CPU Affinity & Core Parking Management (hybrid P-core detection via
+//      GetLogicalProcessorInformationEx + PowerWriteACValueIndex core-parking)
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+
+// Required for GetLogicalProcessorInformationEx / EfficiencyClass (hybrid
+// P-core/E-core detection) used by the CPU affinity module below. Only
+// raises the API surface windows.h declares at compile time.
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
 #endif
 
 // Suppress MSVC C4996 security warnings for getenv, fopen, etc.
@@ -32,12 +46,38 @@
 #include <cstdint>
 #include <memory>
 #include <exception>
+#include <mutex>
 #include <mmsystem.h>
 
 // Ensure NTSTATUS exists
 #ifndef NTSTATUS
 typedef LONG NTSTATUS;
 #endif
+
+// SystemMemoryListInformation / SYSTEM_MEMORY_LIST_COMMAND are documented in
+// the WDK (ntddk.h / winternl-adjacent headers) but not exposed through a
+// public Win32 wrapper. Declared here so the module can call
+// NtSetSystemInformation transparently (resolved dynamically from ntdll.dll,
+// same pattern as avrt.dll/powrprof.dll elsewhere in this file) without
+// requiring the WDK to build this project.
+#ifndef SystemMemoryListInformation
+#define SystemMemoryListInformation 80
+#endif
+
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+
+typedef enum _SYSTEM_MEMORY_LIST_COMMAND
+{
+    MemoryCaptureAccessedBits,
+    MemoryCaptureAndResetAccessedBits,
+    MemoryEmptyWorkingSets,
+    MemoryFlushModifiedList,
+    MemoryPurgeStandbyList,
+    MemoryPurgeLowPriorityStandbyList,
+    MemoryCommandMax
+} SYSTEM_MEMORY_LIST_COMMAND;
 
 // AVRT priority constants (may not be defined in all MinGW versions)
 #ifndef AVRT_PRIORITY_HIGH
@@ -125,6 +165,48 @@ static std::string utf8_from_utf16(const wchar_t *text)
     return out;
 }
 
+// Enables a named privilege (e.g. SeProfileSingleProcessPrivilege) on the
+// current process token. This only ever ENABLES a privilege the token
+// already holds by policy (typically requires the process to be running
+// elevated/as Administrator) - it cannot grant a privilege the account
+// doesn't already have. Failure is expected and non-fatal on a standard
+// (non-admin) token; callers must treat this as best-effort.
+static bool enable_privilege(LPCWSTR privilege_name)
+{
+    try {
+        HANDLE h_token = NULL;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &h_token)) {
+            native_log("enable_privilege: OpenProcessToken failed, error %u", GetLastError());
+            return false;
+        }
+
+        LUID luid;
+        if (!LookupPrivilegeValueW(NULL, privilege_name, &luid)) {
+            native_log("enable_privilege: LookupPrivilegeValueW failed, error %u", GetLastError());
+            CloseHandle(h_token);
+            return false;
+        }
+
+        TOKEN_PRIVILEGES tp;
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Luid = luid;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+        BOOL adjust_ok = AdjustTokenPrivileges(h_token, FALSE, &tp, sizeof(tp), NULL, NULL);
+        DWORD last_err = GetLastError();
+        CloseHandle(h_token);
+
+        // AdjustTokenPrivileges can return TRUE while still not actually
+        // granting the privilege (ERROR_NOT_ALL_ASSIGNED) if the token
+        // doesn't hold it - both conditions must be checked.
+        bool ok = (adjust_ok != 0) && (last_err == ERROR_SUCCESS);
+        native_log("enable_privilege: requested (best-effort) -> %s", ok ? "OK" : "NOT GRANTED (needs elevation)");
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
 // ========== MODULE 1: HIGH PRECISION TIMER RESOLUTION ==========
 class TimerResolutionManager
 {
@@ -143,7 +225,8 @@ public:
                 return false;
             }
             
-            UINT resolution = (tc.wPeriodMin < 1) ? tc.wPeriodMin : 1;
+            // Use the system's minimum supported period, but never below 1ms
+            UINT resolution = (tc.wPeriodMin > 1) ? tc.wPeriodMin : 1;
             MMRESULT result = timeBeginPeriod(resolution);
             if (result != TIMERR_NOERROR) {
                 native_log("TimerResolution: timeBeginPeriod failed with result %u", result);
@@ -190,9 +273,10 @@ private:
     PFN_AvSetMmThreadCharacteristicsW p_av_set;
     PFN_AvSetMmThreadPriority p_av_prio;
     PFN_AvRevertMmThreadCharacteristics p_av_revert;
+    HANDLE av_task_handle;
     
 public:
-    MMCSSThreadRegistration() : h_avrt(NULL), p_av_set(NULL), p_av_prio(NULL), p_av_revert(NULL) {}
+    MMCSSThreadRegistration() : h_avrt(NULL), p_av_set(NULL), p_av_prio(NULL), p_av_revert(NULL), av_task_handle(NULL) {}
     
     bool init()
     {
@@ -236,6 +320,8 @@ public:
                 return false;
             }
             
+            av_task_handle = av_handle;
+            
             // Set high priority
             if (p_av_prio) {
                 BOOL ok = p_av_prio(av_handle, AVRT_PRIORITY_HIGH);
@@ -248,8 +334,24 @@ public:
         }
     }
     
+    bool revert()
+    {
+        try {
+            if (av_task_handle && p_av_revert) {
+                BOOL ok = p_av_revert(av_task_handle);
+                native_log("MMCSS: Thread characteristics reverted: %d", ok ? 1 : 0);
+                av_task_handle = NULL;
+                return ok != 0;
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+    
     ~MMCSSThreadRegistration()
     {
+        revert();
         if (h_avrt) {
             FreeLibrary(h_avrt);
             h_avrt = NULL;
@@ -490,7 +592,13 @@ private:
 // ========== MODULE 5: SELF-PROCESS & HEAP HARDENING ==========
 class ProcessHardening
 {
+private:
+    DWORD original_priority_class;
+    bool priority_changed;
+    
 public:
+    ProcessHardening() : original_priority_class(0), priority_changed(false) {}
+    
     bool apply_hardening()
     {
         bool success = true;
@@ -510,11 +618,36 @@ public:
         return success;
     }
     
+    // Restores the process priority class that was active before apply_hardening().
+    // Heap hardening (HeapEnableTerminationOnCorruption) is intentionally NOT undone:
+    // Windows does not support disabling it once set, and it's a safety net, not a
+    // performance trade-off, so leaving it on is harmless.
+    bool revert_priority()
+    {
+        try {
+            if (!priority_changed) return true;
+            HANDLE h_current = GetCurrentProcess();
+            BOOL ok = SetPriorityClass(h_current, original_priority_class);
+            native_log("ProcessHardening: Restored original priority class: %d", ok ? 1 : 0);
+            priority_changed = false;
+            return ok != 0;
+        } catch (...) {
+            return false;
+        }
+    }
+    
 private:
     bool set_high_priority()
     {
         try {
             HANDLE h_current = GetCurrentProcess();
+            
+            DWORD current_class = GetPriorityClass(h_current);
+            if (current_class != 0) {
+                original_priority_class = current_class;
+                priority_changed = true;
+            }
+            
             BOOL ok = SetPriorityClass(h_current, HIGH_PRIORITY_CLASS);
             if (ok) {
                 native_log("ProcessHardening: Set current process to HIGH_PRIORITY_CLASS");
@@ -522,6 +655,7 @@ private:
             } else {
                 DWORD err = GetLastError();
                 native_log("ProcessHardening: SetPriorityClass failed, error %u", err);
+                priority_changed = false;
                 return false;
             }
         } catch (...) {
@@ -557,6 +691,673 @@ private:
             }
         } catch (...) {
             return false;
+        }
+    }
+};
+
+// Forward declaration - full definition lives with the whitelist code below
+static bool is_protected_process(const std::string &exe_name, const std::vector<std::string> &whitelist);
+
+// ========== MODULE 6: MEMORY OPTIMIZER (WORKING SET TRIMMING) ==========
+// Honest description of what this does and does not do:
+// - EmptyWorkingSet / SetProcessWorkingSetSize move a process's *currently
+//   resident but not actively used* pages out of physical RAM. Pages that are
+//   still needed get paged back in automatically on next access (a soft
+//   page fault). This is NOT deletion or a leak fix; it's a cache trim.
+// - It only meaningfully helps when a process has accumulated a large
+//   working set it isn't actively using (idle background apps, browsers
+//   after tab-heavy sessions). Trimming a genuinely active process (e.g.
+//   the game itself, mid-session) can cause a stutter as pages page back in.
+// - This module deliberately never touches processes on the protected
+//   whitelist (see is_protected_process) — games and anti-cheat included.
+struct MemoryTrimResult
+{
+    DWORD pid;
+    std::string exe_name;
+    SIZE_T working_set_before;
+    SIZE_T working_set_after;
+    bool success;
+};
+
+// SEH-protected single-process working-set trim.
+//
+// Win32 APIs that reach into another process's memory (GetProcessMemoryInfo,
+// SetProcessWorkingSetSize) can raise structured exceptions - e.g. an access
+// violation if the target process exits or its memory layout changes mid-call.
+// A plain C++ `catch (...)` does NOT catch these unless the whole binary is
+// built with the non-default /EHa flag, which this project intentionally
+// does not require. Isolating the risky calls behind __try/__except here
+// gives crash safety without depending on a global compiler flag.
+//
+// IMPORTANT: this function must stay free of C++ objects with non-trivial
+// destructors (std::string, std::vector, etc.) - MSVC raises compiler error
+// C2712 if __try is mixed with object unwinding in the same function.
+static bool seh_trim_single_process(HANDLE h_proc, SIZE_T *out_before, SIZE_T *out_after)
+{
+#if defined(_MSC_VER)
+    __try 
+    {
+
+        PROCESS_MEMORY_COUNTERS pmc;
+        SIZE_T before = 0, after = 0;
+
+        ZeroMemory(&pmc, sizeof(pmc));
+        if (GetProcessMemoryInfo(h_proc, &pmc, sizeof(pmc))) {
+            before = pmc.WorkingSetSize;
+        }
+
+        BOOL ok = SetProcessWorkingSetSize(h_proc, (SIZE_T)-1, (SIZE_T)-1);
+
+        ZeroMemory(&pmc, sizeof(pmc));
+        if (GetProcessMemoryInfo(h_proc, &pmc, sizeof(pmc))) {
+            after = pmc.WorkingSetSize;
+        }
+
+        if (out_before) *out_before = before;
+        if (out_after) *out_after = after;
+        return ok != 0;
+    } 
+    __except (EXCEPTION_EXECUTE_HANDLER) 
+    {
+        if (out_before) *out_before = 0;
+        if (out_after) *out_after = 0;
+        return false;
+    }
+#else
+    try {
+        PROCESS_MEMORY_COUNTERS pmc;
+        SIZE_T before = 0, after = 0;
+
+        ZeroMemory(&pmc, sizeof(pmc));
+        if (GetProcessMemoryInfo(h_proc, &pmc, sizeof(pmc))) {
+            before = pmc.WorkingSetSize;
+        }
+
+        BOOL ok = SetProcessWorkingSetSize(h_proc, (SIZE_T)-1, (SIZE_T)-1);
+
+        ZeroMemory(&pmc, sizeof(pmc));
+        if (GetProcessMemoryInfo(h_proc, &pmc, sizeof(pmc))) {
+            after = pmc.WorkingSetSize;
+        }
+
+        if (out_before) *out_before = before;
+        if (out_after) *out_after = after;
+        return ok != 0;
+    } catch (...) {
+        if (out_before) *out_before = 0;
+        if (out_after) *out_after = 0;
+        return false;
+    }
+#endif
+}
+
+class MemoryOptimizer
+{
+public:
+    // Trim this DLL's own host process. Always safe to call.
+    bool trim_own_working_set(SIZE_T *out_before = NULL, SIZE_T *out_after = NULL)
+    {
+        try {
+            HANDLE h_self = GetCurrentProcess();
+            SIZE_T before = get_working_set_size(h_self);
+            
+            BOOL ok = EmptyWorkingSet(h_self);
+            
+            SIZE_T after = get_working_set_size(h_self);
+            if (out_before) *out_before = before;
+            if (out_after) *out_after = after;
+            
+            native_log("MemoryOptimizer: Self trim %s (%.1f MB -> %.1f MB)",
+                ok ? "OK" : "FAILED",
+                before / (1024.0 * 1024.0),
+                after / (1024.0 * 1024.0));
+            
+            return ok != 0;
+        } catch (...) {
+            return false;
+        }
+    }
+    
+    // Trim working sets of eligible background processes system-wide.
+    // "Eligible" = not on the protected whitelist, not a critical PID (0/4),
+    // and readable/writable via OpenProcess. Requires no special privilege
+    // for processes owned by the same user session; cross-session/elevated
+    // processes will simply fail OpenProcess and are skipped, not forced.
+    std::vector<MemoryTrimResult> trim_system_background_processes(
+        const std::vector<std::string> &protected_whitelist,
+        size_t max_processes = 64)
+    {
+        std::vector<MemoryTrimResult> results;
+        
+        try {
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap == INVALID_HANDLE_VALUE) {
+                native_log("MemoryOptimizer: CreateToolhelp32Snapshot failed");
+                return results;
+            }
+            
+            PROCESSENTRY32W pe;
+            pe.dwSize = sizeof(PROCESSENTRY32W);
+            
+            if (!Process32FirstW(snap, &pe)) {
+                CloseHandle(snap);
+                return results;
+            }
+            
+            do {
+                if (results.size() >= max_processes) break;
+                if (pe.th32ProcessID <= 4) continue; // System / System Idle
+                
+                std::string exe_name = utf8_from_utf16(pe.szExeFile);
+                if (is_protected_process(exe_name, protected_whitelist)) {
+                    continue; // never touch games, anti-cheat, system, drivers
+                }
+                
+                MemoryTrimResult r;
+                r.pid = pe.th32ProcessID;
+                r.exe_name = exe_name;
+                r.success = false;
+                r.working_set_before = 0;
+                r.working_set_after = 0;
+                
+                HANDLE h_proc = OpenProcess(
+                    PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION,
+                    FALSE, pe.th32ProcessID);
+                
+                if (!h_proc) {
+                    continue; // no access (elevated/system process) - skip silently
+                }
+                
+                // SetProcessWorkingSetSize(-1,-1) is the documented way to
+                // request an immediate trim (equivalent to EmptyWorkingSet).
+                // Routed through seh_trim_single_process so an access
+                // violation touching another process's memory can't take
+                // down this one (see comment on that function).
+                r.success = seh_trim_single_process(h_proc, &r.working_set_before, &r.working_set_after);
+                
+                CloseHandle(h_proc);
+                results.push_back(r);
+                
+            } while (Process32NextW(snap, &pe));
+            
+            CloseHandle(snap);
+            
+            SIZE_T total_freed = 0;
+            for (const auto &r : results) {
+                if (r.success && r.working_set_after < r.working_set_before) {
+                    total_freed += (r.working_set_before - r.working_set_after);
+                }
+            }
+            
+            native_log("MemoryOptimizer: Trimmed %zu processes, ~%.1f MB moved out of working sets",
+                results.size(), total_freed / (1024.0 * 1024.0));
+            
+        } catch (...) {
+            native_log("MemoryOptimizer: Exception during system trim");
+        }
+        
+        return results;
+    }
+    
+private:
+    SIZE_T get_working_set_size(HANDLE h_process)
+    {
+        PROCESS_MEMORY_COUNTERS pmc;
+        ZeroMemory(&pmc, sizeof(pmc));
+        if (GetProcessMemoryInfo(h_process, &pmc, sizeof(pmc))) {
+            return pmc.WorkingSetSize;
+        }
+        return 0;
+    }
+};
+
+// ========== MODULE 7: STANDBY LIST PURGE ==========
+// Windows caches recently-used file/game pages in the "Standby List" so a
+// future re-open is fast. Under memory pressure Windows normally reclaims
+// this cache on its own, but the reclaim isn't always fast enough during a
+// heavy level-load spike, which can show up as a transient FPS drop. This
+// module calls the same underlying mechanism tools like RAMMap's "Empty
+// Standby List" use: NtSetSystemInformation(SystemMemoryListInformation,
+// MemoryPurgeStandbyList). It never touches active/working-set memory of
+// any running process - only the discardable standby cache.
+//
+// Requires SeProfileSingleProcessPrivilege, which in practice means the
+// host process must be running elevated (as Administrator). On a
+// non-elevated token this fails safely and is logged, never crashes.
+class StandbyListPurgeManager
+{
+private:
+    HMODULE h_ntdll;
+    typedef NTSTATUS (WINAPI *PFN_NtSetSystemInformation)(int, PVOID, ULONG);
+    PFN_NtSetSystemInformation p_nt_set_sysinfo;
+    bool privilege_available;
+
+public:
+    StandbyListPurgeManager() : h_ntdll(NULL), p_nt_set_sysinfo(NULL), privilege_available(false) {}
+
+    bool init()
+    {
+        try {
+            h_ntdll = LoadLibraryW(L"ntdll.dll");
+            if (!h_ntdll) {
+                native_log("StandbyListPurge: Failed to load ntdll.dll");
+                return false;
+            }
+
+            p_nt_set_sysinfo = reinterpret_cast<PFN_NtSetSystemInformation>(
+                GetProcAddress(h_ntdll, "NtSetSystemInformation"));
+
+            if (!p_nt_set_sysinfo) {
+                native_log("StandbyListPurge: Failed to resolve NtSetSystemInformation");
+                FreeLibrary(h_ntdll);
+                h_ntdll = NULL;
+                return false;
+            }
+
+            // Best-effort; purge_standby_list() below still checks the
+            // actual NTSTATUS and fails safely if this wasn't granted.
+            privilege_available = enable_privilege(L"SeProfileSingleProcessPrivilege");
+            enable_privilege(L"SeIncreaseQuotaPrivilege");
+
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool purge_standby_list()
+    {
+        try {
+            if (!p_nt_set_sysinfo) return false;
+
+            SYSTEM_MEMORY_LIST_COMMAND cmd = MemoryPurgeStandbyList;
+            NTSTATUS status = p_nt_set_sysinfo(SystemMemoryListInformation, &cmd, sizeof(cmd));
+            bool ok = (status == STATUS_SUCCESS);
+
+            native_log("StandbyListPurge: MemoryPurgeStandbyList NTSTATUS=0x%08lX (%s)%s",
+                (unsigned long)status,
+                ok ? "OK" : "FAILED",
+                (!ok && !privilege_available) ? " - requires running elevated (Administrator)" : "");
+
+            return ok;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    ~StandbyListPurgeManager()
+    {
+        if (h_ntdll) {
+            FreeLibrary(h_ntdll);
+            h_ntdll = NULL;
+        }
+    }
+};
+
+// ========== MODULE 8: DYNAMIC RAM THRESHOLD MONITOR ==========
+// The other modules in this file run once, at DllRegisterFocusFilter time.
+// This module instead runs a lightweight background thread for the
+// lifetime of the focus session: it polls system-wide memory load via
+// GlobalMemoryStatusEx (a cheap call - no disk I/O, no process
+// enumeration) and only triggers the heavier standby-list purge /
+// background working-set trim when memory pressure actually crosses the
+// configured threshold. A cooldown prevents back-to-back triggers from
+// hammering the disk or causing unnecessary page-fault churn in
+// still-active background apps.
+class DynamicMemoryMonitor
+{
+private:
+    HANDLE h_thread;
+    volatile LONG stop_flag;
+    DWORD threshold_percent;   // e.g. 85 = trigger when memory load >= 85%
+    DWORD poll_interval_ms;    // how often to check GlobalMemoryStatusEx
+    DWORD cooldown_ms;         // minimum time between two triggered cleanups
+    StandbyListPurgeManager *standby_purger; // not owned
+    MemoryOptimizer *mem_opt;                // not owned
+    const std::vector<std::string> *protected_list; // not owned
+
+    static DWORD WINAPI thread_proc(LPVOID param)
+    {
+        DynamicMemoryMonitor *self = reinterpret_cast<DynamicMemoryMonitor *>(param);
+        self->run();
+        return 0;
+    }
+
+    void run()
+    {
+        native_log("DynamicMemoryMonitor: thread started (threshold=%lu%%, poll=%lums, cooldown=%lums)",
+            (unsigned long)threshold_percent, (unsigned long)poll_interval_ms, (unsigned long)cooldown_ms);
+
+        ULONGLONG last_trigger_tick = 0;
+
+        while (InterlockedCompareExchange(&stop_flag, 0, 0) == 0) {
+            MEMORYSTATUSEX ms;
+            ZeroMemory(&ms, sizeof(ms));
+            ms.dwLength = sizeof(ms);
+
+            if (GlobalMemoryStatusEx(&ms) && ms.dwMemoryLoad >= threshold_percent) {
+                ULONGLONG now = GetTickCount64();
+                if (last_trigger_tick == 0 || (now - last_trigger_tick) >= cooldown_ms) {
+                    native_log("DynamicMemoryMonitor: memory load %lu%% >= threshold %lu%%, triggering cleanup",
+                        (unsigned long)ms.dwMemoryLoad, (unsigned long)threshold_percent);
+
+                    if (standby_purger) standby_purger->purge_standby_list();
+                    if (mem_opt && protected_list) mem_opt->trim_system_background_processes(*protected_list);
+
+                    last_trigger_tick = now;
+                } else {
+                    native_log("DynamicMemoryMonitor: load %lu%% over threshold but still in cooldown, skipping",
+                        (unsigned long)ms.dwMemoryLoad);
+                }
+            }
+
+            // Sleep in small slices so a stop() request is honored promptly
+            // instead of waiting out a potentially long poll interval.
+            DWORD slept = 0;
+            const DWORD slice = 200;
+            while (slept < poll_interval_ms && InterlockedCompareExchange(&stop_flag, 0, 0) == 0) {
+                DWORD remaining = poll_interval_ms - slept;
+                Sleep(remaining < slice ? remaining : slice);
+                slept += slice;
+            }
+        }
+
+        native_log("DynamicMemoryMonitor: thread exiting");
+    }
+
+public:
+    DynamicMemoryMonitor()
+        : h_thread(NULL), stop_flag(0), threshold_percent(85), poll_interval_ms(5000),
+          cooldown_ms(30000), standby_purger(NULL), mem_opt(NULL), protected_list(NULL) {}
+
+    // Reads FORZEOS_FOCUS_RAM_THRESHOLD / _POLL_MS / _COOLDOWN_MS env vars
+    // if present, otherwise keeps the defaults above. Kept consistent with
+    // this file's existing get_env_var-based configuration style.
+    void load_config_from_env()
+    {
+        try {
+            std::string thr = get_env_var("FORZEOS_FOCUS_RAM_THRESHOLD", "");
+            if (!thr.empty()) {
+                int v = atoi(thr.c_str());
+                if (v > 0 && v <= 100) threshold_percent = (DWORD)v;
+            }
+            std::string poll = get_env_var("FORZEOS_FOCUS_RAM_POLL_MS", "");
+            if (!poll.empty()) {
+                int v = atoi(poll.c_str());
+                if (v >= 500) poll_interval_ms = (DWORD)v;
+            }
+            std::string cd = get_env_var("FORZEOS_FOCUS_RAM_COOLDOWN_MS", "");
+            if (!cd.empty()) {
+                int v = atoi(cd.c_str());
+                if (v >= 1000) cooldown_ms = (DWORD)v;
+            }
+        } catch (...) {
+            // keep defaults
+        }
+    }
+
+    bool start(StandbyListPurgeManager *purger, MemoryOptimizer *opt, const std::vector<std::string> *whitelist)
+    {
+        try {
+            if (h_thread) return true; // already running
+
+            load_config_from_env();
+
+            standby_purger = purger;
+            mem_opt = opt;
+            protected_list = whitelist;
+            stop_flag = 0;
+
+            h_thread = CreateThread(NULL, 0, thread_proc, this, 0, NULL);
+            if (!h_thread) {
+                native_log("DynamicMemoryMonitor: CreateThread failed, error %u", GetLastError());
+                return false;
+            }
+
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool stop()
+    {
+        try {
+            if (!h_thread) return true;
+
+            InterlockedExchange(&stop_flag, 1);
+            // Wait for the thread to notice and exit cleanly; if it somehow
+            // doesn't within 3s we still close our handle rather than hang
+            // DLL unload - the thread's own resources are stack-only.
+            WaitForSingleObject(h_thread, 3000);
+            CloseHandle(h_thread);
+            h_thread = NULL;
+
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    ~DynamicMemoryMonitor()
+    {
+        stop();
+    }
+};
+
+// ========== MODULE 9: CPU AFFINITY & CORE PARKING MANAGEMENT ==========
+// Two related but distinct optimizations:
+//
+// 1. Process affinity: on hybrid CPUs (Intel 12th-gen+ P-core/E-core,
+//    similar AMD designs) we detect the highest-EfficiencyClass core group
+//    via GetLogicalProcessorInformationEx(RelationProcessorCore) and pin
+//    the current process to just those cores with SetProcessAffinityMask,
+//    so background/scheduler noise is less likely to displace this
+//    process's threads onto slower efficiency cores. On non-hybrid CPUs
+//    every core reports the same efficiency class, so the computed mask
+//    naturally becomes "all cores" - a safe no-op.
+//
+// 2. Core parking: Windows' power scheduler "parks" (idles down) cores
+//    under light load to save power, which adds latency when a parked
+//    core is suddenly needed. We use the same documented power-policy API
+//    the Control Panel "Processor power management -> minimum parked
+//    cores" slider uses (PowerWriteACValueIndex against
+//    GUID_PROCESSOR_CORE_PARKING_MIN_CORES) to request that all cores
+//    stay unparked while focus mode is active.
+class CpuAffinityManager
+{
+private:
+    DWORD_PTR original_affinity_mask;
+    bool original_saved;
+    HMODULE h_powrprof;
+
+    typedef DWORD (WINAPI *PFN_PowerWriteACValueIndex)(HANDLE, const GUID *, const GUID *, const GUID *, DWORD);
+    typedef DWORD (WINAPI *PFN_PowerSetActiveScheme)(HANDLE, const GUID *);
+    typedef DWORD (WINAPI *PFN_PowerGetActiveScheme)(HANDLE, GUID **);
+
+    // Builds a mask of the "performance" core group on hybrid CPUs (the
+    // core group with the highest reported EfficiencyClass). On a uniform
+    // (non-hybrid) CPU every core shares the same class, so out_mask ends
+    // up equal to "every core the process is allowed to use" - correct,
+    // safe behavior rather than an error.
+    bool build_performance_core_mask(DWORD_PTR *out_mask)
+    {
+        try {
+            DWORD len = 0;
+            GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &len);
+            if (len == 0) {
+                native_log("CpuAffinity: GetLogicalProcessorInformationEx size query failed");
+                return false;
+            }
+
+            std::vector<BYTE> buffer(len);
+            PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info =
+                reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data());
+
+            if (!GetLogicalProcessorInformationEx(RelationProcessorCore, info, &len)) {
+                native_log("CpuAffinity: GetLogicalProcessorInformationEx failed, error %u", GetLastError());
+                return false;
+            }
+
+            DWORD_PTR all_mask = 0;
+            BYTE max_eff_class = 0;
+            BYTE *cursor = buffer.data();
+            BYTE *end = buffer.data() + len;
+
+            // Pass 1: collect the full core mask and the highest efficiency class present.
+            while (cursor < end) {
+                PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX entry =
+                    reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(cursor);
+                if (entry->Relationship == RelationProcessorCore) {
+                    if (entry->Processor.EfficiencyClass > max_eff_class) {
+                        max_eff_class = entry->Processor.EfficiencyClass;
+                    }
+                    for (WORD g = 0; g < entry->Processor.GroupCount; ++g) {
+                        all_mask |= entry->Processor.GroupMask[g].Mask;
+                    }
+                }
+                if (entry->Size == 0) break; // guard against malformed data
+                cursor += entry->Size;
+            }
+
+            // Pass 2: collect only the cores at the highest efficiency class.
+            DWORD_PTR perf_mask = 0;
+            cursor = buffer.data();
+            while (cursor < end) {
+                PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX entry =
+                    reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(cursor);
+                if (entry->Relationship == RelationProcessorCore &&
+                    entry->Processor.EfficiencyClass == max_eff_class) {
+                    for (WORD g = 0; g < entry->Processor.GroupCount; ++g) {
+                        perf_mask |= entry->Processor.GroupMask[g].Mask;
+                    }
+                }
+                if (entry->Size == 0) break;
+                cursor += entry->Size;
+            }
+
+            *out_mask = perf_mask ? perf_mask : all_mask;
+
+            native_log("CpuAffinity: %s CPU detected, target mask=0x%p (all-cores mask=0x%p)",
+                (perf_mask && perf_mask != all_mask) ? "hybrid" : "uniform",
+                (void *)*out_mask, (void *)all_mask);
+
+            return *out_mask != 0;
+        } catch (...) {
+            return false;
+        }
+    }
+
+public:
+    CpuAffinityManager() : original_affinity_mask(0), original_saved(false), h_powrprof(NULL) {}
+
+    bool apply_current_process_affinity()
+    {
+        try {
+            HANDLE h_self = GetCurrentProcess();
+            DWORD_PTR proc_mask = 0, sys_mask = 0;
+
+            if (!GetProcessAffinityMask(h_self, &proc_mask, &sys_mask)) {
+                native_log("CpuAffinity: GetProcessAffinityMask failed, error %u", GetLastError());
+                return false;
+            }
+
+            original_affinity_mask = proc_mask;
+            original_saved = true;
+
+            DWORD_PTR perf_mask = 0;
+            if (!build_performance_core_mask(&perf_mask) || perf_mask == 0) {
+                native_log("CpuAffinity: performance-core detection unavailable, leaving default affinity untouched");
+                return false;
+            }
+
+            // Never request cores the system didn't actually grant this process.
+            perf_mask &= sys_mask;
+            if (perf_mask == 0) {
+                native_log("CpuAffinity: computed mask empty after intersecting with system mask, skipping");
+                return false;
+            }
+
+            BOOL ok = SetProcessAffinityMask(h_self, perf_mask);
+            native_log("CpuAffinity: SetProcessAffinityMask(0x%p) -> %s", (void *)perf_mask, ok ? "OK" : "FAILED");
+            return ok != 0;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool restore_affinity()
+    {
+        try {
+            if (!original_saved) return true;
+            HANDLE h_self = GetCurrentProcess();
+            BOOL ok = SetProcessAffinityMask(h_self, original_affinity_mask);
+            native_log("CpuAffinity: affinity restored -> %s", ok ? "OK" : "FAILED");
+            original_saved = false;
+            return ok != 0;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // Requests that all cores stay unparked (min parked cores = 100% stay
+    // active) via the documented power-policy API - the same mechanism
+    // Windows' own Power Options advanced settings use. This is a
+    // system-wide power-plan setting, not a per-process one, so it is left
+    // in place on shutdown by design (see PerformanceManager::shutdown),
+    // consistent with how the registry fixes are handled elsewhere in
+    // this file.
+    bool disable_core_parking()
+    {
+        try {
+            h_powrprof = LoadLibraryW(L"powrprof.dll");
+            if (!h_powrprof) {
+                native_log("CpuAffinity: Failed to load powrprof.dll");
+                return false;
+            }
+
+            PFN_PowerWriteACValueIndex p_write_ac = reinterpret_cast<PFN_PowerWriteACValueIndex>(
+                GetProcAddress(h_powrprof, "PowerWriteACValueIndex"));
+            PFN_PowerSetActiveScheme p_set_scheme = reinterpret_cast<PFN_PowerSetActiveScheme>(
+                GetProcAddress(h_powrprof, "PowerSetActiveScheme"));
+            PFN_PowerGetActiveScheme p_get_scheme = reinterpret_cast<PFN_PowerGetActiveScheme>(
+                GetProcAddress(h_powrprof, "PowerGetActiveScheme"));
+
+            if (!p_write_ac || !p_set_scheme || !p_get_scheme) {
+                native_log("CpuAffinity: Failed to resolve power-policy functions");
+                return false;
+            }
+
+            // GUID_PROCESSOR_SETTINGS_SUBGROUP
+            GUID sub_processor = { 0x54533251, 0x82be, 0x4824, { 0x96, 0xc1, 0x47, 0xb6, 0x0b, 0x74, 0x0d, 0x00 } };
+            // GUID_PROCESSOR_CORE_PARKING_MIN_CORES
+            GUID min_cores_setting = { 0x0cc5b647, 0xc1df, 0x4637, { 0x89, 0x1a, 0xde, 0xc3, 0x5c, 0x31, 0x85, 0x83 } };
+
+            // Apply to the currently active scheme (NULL GUID = active scheme).
+            DWORD result = p_write_ac(NULL, NULL, &sub_processor, &min_cores_setting, 100);
+            bool ok = (result == ERROR_SUCCESS);
+            native_log("CpuAffinity: core parking min-cores set to 100%% -> %s (error %lu)",
+                ok ? "OK" : "FAILED", (unsigned long)result);
+
+            // Re-activate the current scheme so the new AC value index takes
+            // effect immediately rather than on next plan switch.
+            GUID *active_scheme = NULL;
+            if (p_get_scheme(NULL, &active_scheme) == ERROR_SUCCESS && active_scheme) {
+                p_set_scheme(NULL, active_scheme);
+                LocalFree(active_scheme); // PowerGetActiveScheme allocates via LocalAlloc
+            }
+
+            return ok;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    ~CpuAffinityManager()
+    {
+        if (h_powrprof) {
+            FreeLibrary(h_powrprof);
+            h_powrprof = NULL;
         }
     }
 };
@@ -618,11 +1419,11 @@ static std::vector<std::string> build_protected_whitelist()
         // Starcraft II
         "starcraft ii.exe", "sc2.exe",
         
-        // League of Legends
-        "leagueoflegends.exe", "riotclientservices.exe", "riotgamesservices.exe",
+        // League of Legends (riotclientservices.exe already listed above under Riot Games)
+        "leagueoflegends.exe", "riotgamesservices.exe",
         
-        // Minecraft
-        "javaw.exe", "minecraft.exe", "minecraftlauncher.exe",
+        // Minecraft (javaw.exe already listed above under Python & Dev tools)
+        "minecraft.exe", "minecraftlauncher.exe",
         
         // Other major titles
         "baldursgate3.exe", "cyberpunk2077.exe", "elden ring.exe", "gta5.exe",
@@ -662,6 +1463,34 @@ static std::vector<std::string> build_protected_whitelist()
     return result;
 }
 
+// Returns true if `needle` occurs inside `haystack` at a word boundary on
+// both sides (start/end of string, or a non-alphanumeric neighbor). Plain
+// substring search (std::string::find) let short whitelist tokens like
+// "nvidia" or "audio" match unrelated processes that merely happen to
+// contain those letters (e.g. a hypothetical "mynvidiafix.exe" is fine to
+// match, but "find" would also match inside an arbitrary unrelated token
+// with no separator, which is not what the whitelist author intended).
+// Boundary-checking keeps short vendor/keyword tokens precise without
+// requiring every entry to be a full, exact executable name.
+static bool contains_word_boundary(const std::string &haystack, const std::string &needle)
+{
+    if (needle.empty() || haystack.size() < needle.size()) return false;
+
+    size_t pos = 0;
+    while ((pos = haystack.find(needle, pos)) != std::string::npos) {
+        bool left_ok = (pos == 0) ||
+            !isalnum((unsigned char)haystack[pos - 1]);
+
+        size_t right_idx = pos + needle.size();
+        bool right_ok = (right_idx == haystack.size()) ||
+            !isalnum((unsigned char)haystack[right_idx]);
+
+        if (left_ok && right_ok) return true;
+        pos += 1;
+    }
+    return false;
+}
+
 // Check if process is in protected list
 static bool is_protected_process(const std::string &exe_name, const std::vector<std::string> &whitelist)
 {
@@ -673,11 +1502,12 @@ static bool is_protected_process(const std::string &exe_name, const std::vector<
         name_lower = name_lower.substr(pos + 1);
     }
     
-    // Check exact match
     for (const auto &w : whitelist) {
         if (name_lower == w) return true;
-        // Partial match for paths containing protected names
-        if (name_lower.find(w) != std::string::npos) return true;
+        // Word-boundary match: catches paths/names that legitimately embed
+        // a protected token (e.g. "nvidia broadcast.exe") without letting
+        // the token match mid-word inside an unrelated process name.
+        if (contains_word_boundary(name_lower, w)) return true;
     }
     
     // Protect anything under System32
@@ -694,19 +1524,27 @@ class PerformanceManager
 {
 private:
     static PerformanceManager *instance;
+    static std::once_flag init_flag;
     TimerResolutionManager timer_mgr;
     MMCSSThreadRegistration mmcss;
     PowerPlanManager power_plan;
     RegistryOptimizer registry_opt;
     ProcessHardening process_hard;
+    MemoryOptimizer memory_opt;
+    StandbyListPurgeManager standby_purge;
+    DynamicMemoryMonitor ram_monitor;
+    CpuAffinityManager cpu_affinity;
     std::vector<std::string> protected_processes;
     
 public:
+    // Thread-safe lazy init: std::call_once guarantees the initializer runs
+    // exactly once even if multiple threads race into get_instance()
+    // simultaneously, without needing a manual double-checked-lock mutex.
     static PerformanceManager* get_instance()
     {
-        if (!instance) {
+        std::call_once(init_flag, []() {
             instance = new PerformanceManager();
-        }
+        });
         return instance;
     }
     
@@ -725,16 +1563,56 @@ public:
             bool registry_ok = registry_opt.apply_all_fixes();
             bool harden_ok = process_hard.apply_hardening();
             
+            // Memory optimization: trim eligible background processes, never
+            // touching anything on the protected whitelist (games, anti-cheat,
+            // system-critical). Results are measured, not assumed.
+            SIZE_T self_before = 0, self_after = 0;
+            bool self_trim_ok = memory_opt.trim_own_working_set(&self_before, &self_after);
+            auto trim_results = memory_opt.trim_system_background_processes(protected_processes);
+            
+            SIZE_T total_freed = 0;
+            for (const auto &r : trim_results) {
+                if (r.success && r.working_set_after < r.working_set_before) {
+                    total_freed += (r.working_set_before - r.working_set_after);
+                }
+            }
+
+            // Standby List Purge: one-shot upfront purge, same mechanism
+            // RAMMap's "Empty Standby List" uses. Best-effort - fails
+            // safely (and is logged) on a non-elevated token.
+            bool standby_ok = standby_purge.init() && standby_purge.purge_standby_list();
+
+            // CPU Affinity: pin this process to physical/performance cores
+            // on hybrid CPUs, and request Windows stop parking cores while
+            // focus mode is active.
+            bool affinity_ok = cpu_affinity.apply_current_process_affinity();
+            bool core_parking_ok = cpu_affinity.disable_core_parking();
+
+            // Dynamic RAM Threshold Monitor: unlike the modules above,
+            // which run once here, this starts a background thread that
+            // keeps watching memory load for the rest of the session and
+            // only re-triggers standby purge + background trim when the
+            // configured threshold (default 85%) is actually crossed.
+            bool ram_monitor_ok = ram_monitor.start(&standby_purge, &memory_opt, &protected_processes);
+            
             native_log("=== PerformanceManager: Initialization complete ===");
-            native_log("Timer: %s | MMCSS: %s | Power: %s | Registry: %s | Hardening: %s",
+            native_log("Timer: %s | MMCSS: %s | Power: %s | Registry: %s | Hardening: %s | MemTrim: %s (%zu procs, ~%.1f MB) | StandbyPurge: %s | CpuAffinity: %s | CoreParking: %s | RamMonitor: %s",
                 timer_ok ? "OK" : "FAIL",
                 mmcss_ok ? "OK" : "FAIL",
                 power_ok ? "OK" : "FAIL",
                 registry_ok ? "OK" : "FAIL",
-                harden_ok ? "OK" : "FAIL"
+                harden_ok ? "OK" : "FAIL",
+                self_trim_ok ? "OK" : "FAIL",
+                trim_results.size(),
+                total_freed / (1024.0 * 1024.0),
+                standby_ok ? "OK" : "FAIL",
+                affinity_ok ? "OK" : "FAIL",
+                core_parking_ok ? "OK" : "FAIL",
+                ram_monitor_ok ? "OK" : "FAIL"
             );
             
-            return timer_ok || mmcss_ok || power_ok || registry_ok || harden_ok;
+            return timer_ok || mmcss_ok || power_ok || registry_ok || harden_ok || self_trim_ok
+                || standby_ok || affinity_ok || core_parking_ok || ram_monitor_ok;
         } catch (...) {
             return false;
         }
@@ -745,8 +1623,22 @@ public:
         try {
             native_log("=== PerformanceManager: Shutting down ===");
             
+            // Stop the background RAM monitor first so it can't fire a
+            // purge/trim mid-shutdown while other modules are being reverted.
+            ram_monitor.stop();
+
             timer_mgr.disable();
             power_plan.restore_original_scheme();
+            mmcss.revert();
+            process_hard.revert_priority();
+            cpu_affinity.restore_affinity();
+            // Note: registry fixes (GameDVR/throttling), heap hardening, and
+            // core parking (a system-wide power-plan setting, not a
+            // per-process one) are intentionally left in place on shutdown -
+            // they're safe defaults, not performance trade-offs that need
+            // undoing. Memory trims and standby-list purges are one-shot
+            // actions, not persistent state, so there's nothing to revert
+            // for MemoryOptimizer or StandbyListPurgeManager either.
             
             native_log("=== PerformanceManager: Shutdown complete ===");
             return true;
@@ -767,6 +1659,7 @@ public:
 };
 
 PerformanceManager *PerformanceManager::instance = NULL;
+std::once_flag PerformanceManager::init_flag;
 
 // ========== DLL ENTRY POINTS ==========
 

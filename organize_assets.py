@@ -6,8 +6,10 @@ class App:
         self.root = tk.Toplevel(root)
         self.root.title('{name}')
         tk.Label(self.root, text='Hello from {name}').pack(padx=20, pady=20)
+	tk.Label(self.root, text='
 
 if __name__ == '__main__':
     r = tk.Tk(); r.withdraw(); App(r); r.mainloop()
+
 
 

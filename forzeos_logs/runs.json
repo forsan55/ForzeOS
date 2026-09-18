@@ -24,5 +24,272 @@
     "stdout": "",
     "stderr": "",
     "end_time": "2026-06-07T17:13:21.379979"
+  },
+  {
+    "app": "steam",
+    "pid": 19072,
+    "action": "started",
+    "time": "2026-07-03T20:16:36.604004",
+    "user": "User"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_j7uoo6x_.py",
+    "cwd": "C:\\forzeos",
+    "run_type": "normal",
+    "start_time": "2026-07-21T22:36:56.999585",
+    "pid": 3088,
+    "exit_code": 0,
+    "stdout": "âœ… DLL baÅŸarÄ±yla yÃ¼klendi!\nðŸš€ DllRegisterFocusFilter Sonucu: 1\nðŸ›‘ DllUnregisterFocusFilter Sonucu: 1\n",
+    "stderr": "",
+    "end_time": "2026-07-21T22:36:57.377453"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_dn6_64ij.py",
+    "cwd": "c:\\forzeos",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:55:02.648685",
+    "pid": 32756,
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "  File \"C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_dn6_64ij.py\", line 9\n    tk.Label(self.root, text='hello everybody').pack(padx=30, pady=20)\nTabError: inconsistent use of tabs and spaces in indentation\n",
+    "end_time": "2026-09-04T18:55:03.583379"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_5epveow3.py",
+    "cwd": "c:\\forzeos",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:55:16.968210",
+    "pid": 28916,
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "  File \"C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_5epveow3.py\", line 8\n    tk.Label(self.root, text='hello everybody').pack(padx=30, pady=20)\nTabError: inconsistent use of tabs and spaces in indentation\n",
+    "end_time": "2026-09-04T18:55:17.826035"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_zw0b6dxp.py",
+    "cwd": "c:\\forzeos",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:55:47.848379",
+    "pid": 10560,
+    "exit_code": 3221225786,
+    "stdout": "",
+    "stderr": "",
+    "end_time": "2026-09-04T18:55:50.747741"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run___ru99k3.py",
+    "cwd": "c:\\forzeos",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:56:21.180802",
+    "pid": 28908,
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "  File \"C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run___ru99k3.py\", line 8\n    tk.Label(self.root, text='hello everybody').pack(padx=20, pady=30)\nTabError: inconsistent use of tabs and spaces in indentation\n",
+    "end_time": "2026-09-04T18:56:22.020175"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_44ove6j0.py",
+    "cwd": "c:\\forzeos",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:56:32.635377",
+    "pid": 19488,
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "  File \"C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_44ove6j0.py\", line 8\n    tk.Label(self.root, text='hello everybody').pack(padx=20, pady=30)\nTabError: inconsistent use of tabs and spaces in indentation\n",
+    "end_time": "2026-09-04T18:56:33.447945"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_lxn_y_sc.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:57:26.398254",
+    "pid": 28876,
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "  File \"C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_lxn_y_sc.py\", line 1\n    a == int(input()):\n                     ^\nSyntaxError: invalid syntax\n",
+    "end_time": "2026-09-04T18:57:27.196130"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_7ldhu5dp.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:57:35.011413",
+    "pid": 23204,
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "  File \"C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_7ldhu5dp.py\", line 1\n    a == int(input()):\n                     ^\nSyntaxError: invalid syntax\n",
+    "end_time": "2026-09-04T18:57:35.805793"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_p6k69xc6.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:57:38.531331",
+    "pid": 28404,
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "  File \"C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_p6k69xc6.py\", line 1\n    a == int(input()\n            ^\nSyntaxError: '(' was never closed\n",
+    "end_time": "2026-09-04T18:57:39.365966"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_af8iukjm.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:57:43.165542",
+    "pid": 2508,
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "Traceback (most recent call last):\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_af8iukjm.py\", line 1, in <module>\n    a == int(input())\n    ^\nNameError: name 'a' is not defined\n",
+    "end_time": "2026-09-04T18:57:44.021687"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_jqe4o_xj.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:58:03.037557",
+    "pid": 30440
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_utx6e6cm.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:58:28.136677",
+    "pid": 28860,
+    "exit_code": 3221225786,
+    "stdout": "rakam gir: ",
+    "stderr": "",
+    "end_time": "2026-09-04T18:58:38.383093"
+  },
+  {
+    "pid": 28860,
+    "action": "terminated",
+    "time": "2026-09-04T18:58:45.088266",
+    "user": "User"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forze_run_vppzzx2a.py",
+    "cwd": "C:\\forzeos",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:58:48.894986",
+    "pid": 32240
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_allfi43r.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:58:52.738562",
+    "pid": 6156,
+    "exit_code": 3221225786,
+    "stdout": "rakam gir: ",
+    "stderr": "",
+    "end_time": "2026-09-04T18:58:55.293598"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forze_run_837kzaoa.py",
+    "cwd": "C:\\forzeos",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:58:57.885215",
+    "pid": 2480
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forze_run_vm3ek9x1.py",
+    "cwd": "C:\\forzeos",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:59:03.283220",
+    "pid": 21952
+  },
+  {
+    "pid": 6156,
+    "action": "terminated",
+    "time": "2026-09-04T18:59:11.748931",
+    "user": "User"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_xb98rqq2.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T18:59:33.192315",
+    "pid": 14656,
+    "exit_code": 3221225786,
+    "stdout": "rakam gir: ",
+    "stderr": "",
+    "end_time": "2026-09-04T18:59:35.446458"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_6w5vn3kf.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T19:01:07.121997",
+    "pid": 28912,
+    "exit_code": 3221225786,
+    "stdout": "rakam gir: ",
+    "stderr": "",
+    "end_time": "2026-09-04T19:01:08.772049"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_4os0e4b6.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T19:01:19.841903",
+    "pid": 33432,
+    "exit_code": 0,
+    "stdout": "a\n",
+    "stderr": "",
+    "end_time": "2026-09-04T19:01:20.215732"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_4xfrzwgq.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T19:01:30.550139",
+    "pid": 31408,
+    "exit_code": 3221225786,
+    "stdout": "rakam gir: ",
+    "stderr": "",
+    "end_time": "2026-09-04T19:01:32.459426"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_ldf0poe5.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T19:01:57.769456",
+    "pid": 11412,
+    "exit_code": 3221225786,
+    "stdout": "rakam gir: ",
+    "stderr": "",
+    "end_time": "2026-09-04T19:01:59.442142"
+  },
+  {
+    "user": "User",
+    "cmd": "c:\\forzeos\\.venv\\Scripts\\python.exe C:\\Users\\User\\AppData\\Local\\Temp\\forzeos_run_7wlbkvn5.py",
+    "cwd": "C:\\Users\\User\\AppData\\Local\\Temp",
+    "run_type": "normal",
+    "start_time": "2026-09-04T19:02:45.745995",
+    "pid": 25412,
+    "exit_code": 3221225786,
+    "stdout": "rakam gir: ",
+    "stderr": "",
+    "end_time": "2026-09-04T19:02:47.989746"
   }
 ]

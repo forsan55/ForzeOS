@@ -84,5 +84,621 @@
     "time": "2026-06-12T18:01:09.848232",
     "user": "admin",
     "result": "success"
+  },
+  {
+    "time": "2026-06-13T00:21:47.752755",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-06-19T18:40:34.141087",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-06-22T15:33:10.658064",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-06-22T15:33:11.455501",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-06-22T15:33:16.532206",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-06-23T21:09:03.535804",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-06-23T21:09:05.661099",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-06-23T21:09:08.934134",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-06-25T19:20:22.358644",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-06-25T19:20:23.246734",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-06-25T19:20:24.415504",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-06-27T19:42:22.869504",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-06-27T19:42:23.469163",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-06-27T19:42:26.792171",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 3
+  },
+  {
+    "time": "2026-06-27T19:42:27.499305",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 4
+  },
+  {
+    "time": "2026-06-27T19:42:35.823440",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-06-27T20:21:40.871461",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-03T20:14:44.436050",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-03T23:14:22.695476",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-03T23:46:40.686458",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-03T23:53:39.074877",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-07T23:36:53.118622",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-07T23:41:44.430558",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-08T18:27:02.549744",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-16T22:56:39.407694",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-18T22:59:51.896498",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-19T02:04:16.906960",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-19T02:14:45.014085",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-19T02:16:14.872716",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-19T02:18:40.130389",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-19T02:22:21.672797",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-19T03:04:08.696872",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-19T03:25:30.339050",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-07-19T03:25:39.178488",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 3
+  },
+  {
+    "time": "2026-07-19T03:25:39.772344",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 4
+  },
+  {
+    "time": "2026-07-19T03:25:40.068856",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 4
+  },
+  {
+    "time": "2026-07-19T03:25:43.110207",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-19T03:32:03.232091",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-19T03:39:07.514707",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-21T22:35:54.455860",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-24T18:18:36.801667",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-24T19:23:18.838943",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-24T19:24:23.640311",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-25T18:29:56.653092",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-25T18:30:38.932792",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-07-25T18:31:13.335901",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-04T18:05:54.953699",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-08-04T18:06:02.008825",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-04T18:06:04.477852",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-08-11T22:18:51.891375",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-13T21:00:27.702301",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-13T22:18:56.942757",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-13T22:22:51.087513",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-13T23:20:37.167850",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-14T00:23:50.830126",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-14T00:33:11.747375",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-15T00:50:54.148170",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-15T01:04:20.307728",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-15T01:06:26.750367",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-15T01:09:01.541367",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-15T01:12:34.162650",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-21T00:44:10.610763",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-08-21T00:44:11.126460",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-08-21T00:44:13.773018",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 3
+  },
+  {
+    "time": "2026-08-21T00:44:16.270350",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 4
+  },
+  {
+    "time": "2026-08-21T00:44:18.666916",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 5
+  },
+  {
+    "time": "2026-08-21T00:44:28.013990",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 6
+  },
+  {
+    "time": "2026-08-21T00:44:35.641881",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 7
+  },
+  {
+    "time": "2026-08-21T00:44:53.179769",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 8
+  },
+  {
+    "time": "2026-08-21T00:45:58.424706",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-21T00:47:00.751818",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-08-21T00:47:01.372254",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-08-21T00:47:09.654963",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-21T00:47:35.256405",
+    "user": "Forze",
+    "result": "user_not_found"
+  },
+  {
+    "time": "2026-08-21T00:47:39.161907",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-21T00:47:40.717071",
+    "user": "Forze",
+    "result": "user_not_found"
+  },
+  {
+    "time": "2026-08-21T00:48:17.698232",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-27T19:14:02.852825",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-08-27T19:14:09.735349",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-27T19:14:12.145323",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-08-27T19:50:47.875687",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-27T20:38:45.839698",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-08-27T20:44:03.748694",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-02T00:59:30.022924",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-09-02T00:59:30.672484",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-09-02T00:59:35.953936",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-04T18:50:49.658130",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-09-04T18:50:51.710732",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-04T18:50:54.170992",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-09-08T21:56:47.339232",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-13T20:31:47.269585",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-09-13T20:31:51.580010",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-13T20:31:53.313747",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-09-14T23:31:58.003341",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-09-14T23:31:59.562679",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 3
+  },
+  {
+    "time": "2026-09-14T23:32:01.686327",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 3
+  },
+  {
+    "time": "2026-09-14T23:32:05.774462",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-14T23:37:38.469614",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-09-14T23:37:45.974954",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-14T23:37:47.656026",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-09-14T23:41:45.114702",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-09-14T23:41:47.496485",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-15T00:26:04.186797",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-15T00:27:20.689609",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-09-15T00:27:24.884376",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-15T00:27:26.763819",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-09-17T14:40:01.320821",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-09-17T14:40:07.450930",
+    "user": "admin",
+    "result": "success"
+  },
+  {
+    "time": "2026-09-17T14:40:09.475631",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-09-17T14:41:40.433541",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 1
+  },
+  {
+    "time": "2026-09-17T14:41:46.531944",
+    "user": "admin",
+    "result": "invalid_password",
+    "count": 2
+  },
+  {
+    "time": "2026-09-17T14:46:34.872417",
+    "user": "admin",
+    "result": "user_not_found"
+  },
+  {
+    "time": "2026-09-17T14:46:35.582715",
+    "user": "admin",
+    "result": "user_not_found"
+  },
+  {
+    "time": "2026-09-17T14:46:39.221724",
+    "user": "forze",
+    "result": "success"
   }
 ]

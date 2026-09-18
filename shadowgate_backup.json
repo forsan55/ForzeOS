@@ -1,0 +1,16 @@
+{
+  "recall": {
+    "DisableAIDataAnalysis": "1",
+    "feature_state": 6,
+    "changed": true
+  },
+  "updates": {
+    "service_type": "demand",
+    "values": {
+      "NoAutoRebootWithLoggedOnUsers": "1",
+      "RebootWarningTimeout": "30",
+      "ActiveHoursStart": "13",
+      "ActiveHoursEnd": "6"
+    }
+  }
+}

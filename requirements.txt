@@ -4,12 +4,11 @@ debugpy
 pywebview
 psutil
 requests
-pygame
+pygame-ce
 bcrypt
-pygame-ce 
 python-vlc
 moviepy
-cryptography.fernet
+cryptography
 pymupdf
 Pillow
 matplotlib
@@ -18,7 +17,5 @@ wikipedia
 sounddevice
 soundfile
 PyAudio
-cryptography
 comtypes
-pywin32
-platform
+pywin32==306
