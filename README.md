@@ -139,6 +139,7 @@ The **ForzeOS Focus Engine** is a high-performance, reversible Windows performan
              | - Real PDH GPU Engine/VRAM Query            |
              | - Accurate Loop Latency & Kernel Memory Info|
              +---------------------------------------------+
+```
 
 ## 📐 Technical Architecture
 
