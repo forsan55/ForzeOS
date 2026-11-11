@@ -101,7 +101,39 @@ ForzeOS is more than just a standard Python project; it is a modular architectur
 
 * **Focus Modes:** Features an advanced "Focus Mode" designed for aggressive performance optimization.
 
-
++----------------------------------------------------------------------------------------------------+
+|                                      ForzeOS Focus Engine                                          |
+|  - Lifecycle Controller (Thread-Safe Start / Stop / Safe Re-entrancy via atomics & state latch)    |
+|  - Process Configuration Store (Target Games, Background Candidates, Exclusions, Whitelist)        |
++----------------------------------------------------------------------------------------------------+
+       |                           |                            |                           |
+       v                           v                            v                           v
++------------------+     +------------------+         +-------------------+       +------------------+
+| Process Manager  |     |  CPU Scheduler   |         |  Memory Manager   |       |  Power Manager   |
+| - PID+Creation   |     | - P-Core / E-Core|         | - Hard WorkingSet |       | - AC/DC Aware    |
+|   Verification   |     |   Detection      |         |   Trim Control    |       | - High Perf GUID |
+| - Foreground     |     | - Safe Dynamic   |         | - Pressure Check  |       | - Safe Original  |
+|   Window Lock    |     |   CPU-Sets       |         | - Purge Counter   |       |   Restoration    |
+| - Audio/OBS Guard|     | - Process CPU %  |         | - Total / Avail   |       | - Battery Check  |
++------------------+     +------------------+         +-------------------+       +------------------+
+       |                           |                            |                           |
+       +---------------------------+----------------------------+---------------------------+
+                                   |
+                                   v
+             +---------------------------------------------+
+             |            State Recovery Engine            |
+             | - Discrete Saved vs Applied Tracking Flags  |
+             | - Rollback on Process Terminate / Engine Exit|
+             | - Re-entrant, Mutex-Protected Restoration   |
+             +---------------------------------------------+
+                                   |
+                                   v
+             +---------------------------------------------+
+             |          Engine Telemetry Subsystem         |
+             | - Strict ABI Alignment (#pragma pack(push,1)|
+             | - Real PDH GPU Engine/VRAM Query            |
+             | - Accurate Loop Latency & Kernel Memory Info|
+             +---------------------------------------------+
 
 ## 📐 Technical Architecture
 
