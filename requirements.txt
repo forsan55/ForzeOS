@@ -1,5 +1,5 @@
 ﻿tkinterweb
-PyQt5
+pyqt5
 debugpy
 pywebview
 psutil
@@ -10,12 +10,12 @@ python-vlc
 moviepy
 cryptography
 pymupdf
-Pillow
+pillow
 matplotlib
 numpy
 wikipedia
 sounddevice
 soundfile
-PyAudio
+pyaudio
 comtypes
-pywin32==306
+pywin32
