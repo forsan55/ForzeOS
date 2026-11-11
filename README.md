@@ -101,6 +101,11 @@ ForzeOS is more than just a standard Python project; it is a modular architectur
 
 * **Focus Modes:** Features an advanced "Focus Mode" designed for aggressive performance optimization.
 
+## ForzeOS Focus Engine Architecture
+
+The **ForzeOS Focus Engine** is a high-performance, reversible Windows performance orchestration subsystem designed to optimize CPU scheduling, memory pressure, and power states for gaming workloads while guaranteeing zero permanent OS configuration changes.
+
+```text
 +----------------------------------------------------------------------------------------------------+
 |                                      ForzeOS Focus Engine                                          |
 |  - Lifecycle Controller (Thread-Safe Start / Stop / Safe Re-entrancy via atomics & state latch)    |
