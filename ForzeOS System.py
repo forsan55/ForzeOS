@@ -1211,48 +1211,29 @@ class EnhancedAssistantAI:
         return False
 
 
-# --- Security helpers (bcrypt if available) ---
+# --- Account password hashing (bcrypt with stdlib PBKDF2 fallback) ---
 try:
-    import bcrypt
-    BCRYPT_AVAILABLE = True
-except Exception:
-    BCRYPT_AVAILABLE = False
+    import forzeos_passwords as _passwords
+except ImportError:
+    # Keep the application usable when launched from a packaged/relocated copy.
+    _passwords = None
+
+BCRYPT_AVAILABLE = bool(_passwords and _passwords.bcrypt_available())
+
 
 def hash_password(p: str) -> str:
-    """Return a bcrypt hash; legacy MD5 is verification-only."""
-    if not BCRYPT_AVAILABLE:
-        raise RuntimeError('bcrypt is required to create or change passwords')
-    try:
-        return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
-    except Exception:
-        logger.exception("bcrypt hashing failed")
-        raise
+    """Hash passwords securely even when the optional bcrypt package is absent."""
+    if _passwords is None:
+        raise RuntimeError('Password security module forzeos_passwords.py is missing')
+    return _passwords.hash_password(p)
+
 
 def verify_password(p: str, h: str) -> bool:
-    """Verify a password against stored hash `h`.
-
-    Supports bcrypt hashes and legacy md5 hex.
-    """
-    try:
-        # If hash looks like a bcrypt hash (starts with $2), attempt to use bcrypt.
-        # Import bcrypt dynamically here so verification still works even if the
-        # module wasn't importable at module-import time (defensive).
-        if isinstance(h, str) and h.startswith('$2'):
-            try:
-                import bcrypt as _bcrypt
-                return _bcrypt.checkpw(p.encode(), h.encode())
-            except Exception:
-                # bcrypt not available or check failed; log and return False
-                try:
-                    logger.warning('bcrypt required to verify stored bcrypt hash but is not available')
-                except Exception:
-                    pass
-                return False
-        # legacy md5
-        return hashlib.md5(p.encode()).hexdigest() == h
-    except Exception:
-        logger.exception("Password verify failed")
+    """Verify bcrypt, PBKDF2-SHA256, or legacy MD5 hashes."""
+    if _passwords is None:
+        logger.error('Password security module forzeos_passwords.py is missing')
         return False
+    return _passwords.verify_password(p, h)
 
 # --- PDF improvements imports (lazy) ---
 fitz = _LazyProxy('fitz')
@@ -4413,7 +4394,8 @@ class ForzeOS:
                     }
                     self.config.setdefault('settings', {})['setup_required'] = False
                     self.current_user = username
-                    self.save_config()
+                    if self.save_config() is False:
+                        raise OSError('Account was created but the configuration file could not be saved')
                     win.destroy()
                     self.show_login()
                 except Exception as exc:
@@ -4457,13 +4439,6 @@ class ForzeOS:
             settings = self.config.setdefault('settings', {})
             if not settings.get('setup_required'):
                 return True
-            if not BCRYPT_AVAILABLE:
-                messagebox.showerror(
-                    'ForzeOS Setup',
-                    'bcrypt is required for the first account setup. Install requirements.txt and try again.'
-                )
-                return False
-
             while True:
                 username = simpledialog.askstring(
                     'ForzeOS Setup', 'Choose your username:', parent=self.root
@@ -4496,7 +4471,8 @@ class ForzeOS:
                 }
                 settings['setup_required'] = False
                 self.current_user = username
-                self.save_config()
+                if self.save_config() is False:
+                    raise OSError('Account was created but the configuration file could not be saved')
                 return True
         except Exception:
             logger.exception('Initial user setup failed')
@@ -5684,6 +5660,7 @@ class ForzeOS:
                 # fallback to rename on filesystems that don't support replace
                 os.remove(cfg_path) if os.path.exists(cfg_path) else None
                 os.rename(tmp_path, cfg_path)
+            return True
 
         except Exception as e:
             print(f"Config save error: {e}")
@@ -5691,6 +5668,7 @@ class ForzeOS:
                 messagebox.showerror("Error", f"Settings could not be saved: {e}")
             except Exception:
                 pass
+            return False
 
     def play_system_sound(self, name):
         try:
@@ -6667,13 +6645,16 @@ class ForzeOS:
                     messagebox.showerror("Kilitli", f"Çok fazla deneme. {wait_sec} saniye bekleyin.")
                     return
                 username = username_entry.get().strip()
-                password = password_entry.get().strip()
+                # Passwords are secrets, not identifiers: preserve intentional
+                # leading/trailing spaces exactly as entered.
+                password = password_entry.get()
                 if username in self.config['users']:
                     stored_pass = self.config['users'][username].get('password', '')
                     try:
                         if verify_password(password, stored_pass):
-                            # If stored password is legacy md5, upgrade to bcrypt
-                            if not (isinstance(stored_pass, str) and stored_pass.startswith('$2')) and BCRYPT_AVAILABLE:
+                            # Upgrade verified legacy MD5 hashes when bcrypt is available.
+                            if (_passwords is not None and
+                                    _passwords.password_hash_needs_upgrade(stored_pass)):
                                 try:
                                     new_h = hash_password(password)
                                     self.config['users'][username]['password'] = new_h
@@ -7315,6 +7296,16 @@ class ForzeOS:
                     verified = False
 
                 if verified:
+                    # Preserve existing accounts while migrating legacy MD5
+                    # hashes to the currently available strong hash format.
+                    try:
+                        if (_passwords is not None and
+                                _passwords.password_hash_needs_upgrade(stored_password)):
+                            self.config['users'][username]['password'] = hash_password(password)
+                            self.save_config()
+                    except Exception:
+                        logger.exception('Could not upgrade password hash for user %s', username)
+
                     # successful login: reset counters for user
                     try:
                         self._login_security.pop(username, None)
@@ -13908,13 +13899,13 @@ class ForzeOS:
                 def _toggle_focus():
                     try:
                         if not getattr(self, 'focus_mode_active', False):
-                            # Enter focus mode
                             try:
-                                # Prefer instance method if implemented
-                                if hasattr(self, 'enter_focus_mode'):
+                                if forzeos_focus is not None:
+                                    state = show_focus_mode_dialog(self)
+                                    if state is None:
+                                        return
+                                elif hasattr(self, 'enter_focus_mode'):
                                     self.enter_focus_mode()
-                                elif forzeos_focus and hasattr(forzeos_focus, 'enter_focus_mode'):
-                                    forzeos_focus.enter_focus_mode(self)
                                 else:
                                     messagebox.showinfo('Focus Mode', 'Focus Mode unavailable')
                                     return
@@ -13925,10 +13916,10 @@ class ForzeOS:
                         else:
                             # Exit focus mode
                             try:
-                                if hasattr(self, 'exit_focus_mode'):
+                                if forzeos_focus is not None:
+                                    stop_focus(self)
+                                elif hasattr(self, 'exit_focus_mode'):
                                     self.exit_focus_mode()
-                                elif forzeos_focus and hasattr(forzeos_focus, 'exit_focus_mode'):
-                                    forzeos_focus.exit_focus_mode(self)
                                 else:
                                     messagebox.showinfo('Focus Mode', 'Focus Mode unavailable')
                                     return
@@ -28837,40 +28828,22 @@ Sample gallery for demonstration.
                          bg=self.colors['bg'], fg=self.colors['fg'], font=('Arial', 12, 'bold')).pack(pady=8)
 
                 s_cfg = self.config.setdefault('settings', {})
-                min_rss_var = tk.IntVar(value=int(s_cfg.get('focus_min_rss_mb', 300) or 300))
-                max_trims_var = tk.IntVar(value=int(s_cfg.get('focus_max_trims', 5) or 5))
-                only_same_session_var = tk.IntVar(value=1 if s_cfg.get('focus_only_same_session', True) else 0)
-                wl_var = tk.StringVar(value=','.join(s_cfg.get('focus_whitelist', []) or []))
-                bl_var = tk.StringVar(value=','.join(s_cfg.get('focus_blacklist', []) or []))
+                game_process_var = tk.StringVar(value=str(s_cfg.get('focus_game_process_name', '') or ''))
 
                 pf_rows = tk.Frame(performance_frame, bg=self.colors['bg'])
                 pf_rows.pack(fill=tk.X, padx=6, pady=6)
 
-                tk.Label(pf_rows, text='Min RSS (MB):', bg=self.colors['bg'], fg=self.colors['fg']).grid(row=0, column=0, sticky='w')
-                tk.Spinbox(pf_rows, from_=50, to=32768, increment=50, textvariable=min_rss_var, width=10).grid(row=0, column=1, sticky='w', padx=6)
-
-                tk.Label(pf_rows, text='Max trims per run:', bg=self.colors['bg'], fg=self.colors['fg']).grid(row=1, column=0, sticky='w', pady=(6,0))
-                tk.Spinbox(pf_rows, from_=1, to=50, increment=1, textvariable=max_trims_var, width=10).grid(row=1, column=1, sticky='w', padx=6, pady=(6,0))
-
-                tk.Checkbutton(pf_rows, text='Only same session', variable=only_same_session_var,
-                               bg=self.colors['bg'], fg=self.colors['fg']).grid(row=2, column=0, columnspan=2, sticky='w', pady=(6,0))
-
-                tk.Label(performance_frame, text='Whitelist (comma-separated process substrings):',
-                         bg=self.colors['bg'], fg=self.colors['fg']).pack(pady=(10,2), anchor='w', padx=6)
-                tk.Entry(performance_frame, textvariable=wl_var, width=80).pack(padx=6)
-
-                tk.Label(performance_frame, text='Blacklist (comma-separated process substrings):',
-                         bg=self.colors['bg'], fg=self.colors['fg']).pack(pady=(8,2), anchor='w', padx=6)
-                tk.Entry(performance_frame, textvariable=bl_var, width=80).pack(padx=6)
+                tk.Label(pf_rows, text='Game process (.exe, optional):',
+                         bg=self.colors['bg'], fg=self.colors['fg']).grid(row=0, column=0, sticky='w')
+                tk.Entry(pf_rows, textvariable=game_process_var, width=40).grid(row=0, column=1, sticky='w', padx=6)
+                tk.Label(performance_frame,
+                         text='Leave blank to detect supported game names. Only matching games and a small exact-name list of background apps are adjusted; changes are restored on stop.',
+                         bg=self.colors['bg'], fg=self.colors['fg'], wraplength=540, justify=tk.LEFT).pack(anchor='w', padx=8, pady=6)
 
                 def save_focus_settings():
                     try:
                         s = self.config.setdefault('settings', {})
-                        s['focus_min_rss_mb'] = int(min_rss_var.get())
-                        s['focus_max_trims'] = int(max_trims_var.get())
-                        s['focus_only_same_session'] = 1 if only_same_session_var.get() else 0
-                        s['focus_whitelist'] = [x.strip() for x in wl_var.get().split(',') if x.strip()]
-                        s['focus_blacklist'] = [x.strip() for x in bl_var.get().split(',') if x.strip()]
+                        s['focus_game_process_name'] = game_process_var.get().strip()
                         # persist
                         try:
                             self.save_config()
@@ -28890,6 +28863,9 @@ Sample gallery for demonstration.
 
                 tk.Button(performance_frame, text='Save Focus Settings', command=save_focus_settings,
                           bg=self.colors['accent'], fg='white').pack(pady=10)
+                tk.Button(performance_frame, text='Open Focus Log',
+                          command=lambda: self.open_log_file(str(BASE_DIR / 'logs' / 'aggressive_focus.log')),
+                          bg=self.colors['dark'], fg='white').pack(pady=(0, 8))
             except Exception:
                 logger.exception('Failed to build Performance/Focus controls')
 

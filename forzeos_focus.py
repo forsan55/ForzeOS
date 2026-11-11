@@ -26,6 +26,7 @@ import signal
 import weakref
 import atexit
 import struct
+from logging.handlers import RotatingFileHandler
 from typing import Optional, Dict, List
 
 try:
@@ -36,6 +37,29 @@ except Exception:
 IS_WINDOWS = sys.platform.startswith('win')
 
 logger = logging.getLogger('forzeos_focus')
+_persistent_refs = []
+
+
+def _ensure_focus_logger():
+    """Write focus diagnostics to the project-local logs directory."""
+    try:
+        base = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+        log_dir = os.path.join(base, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        native_log = os.path.join(log_dir, 'aggressive_focus.log')
+        os.environ['FORZEOS_FOCUS_NATIVE_LOG'] = native_log
+        if not any(getattr(handler, 'baseFilename', None) == os.path.abspath(native_log)
+                   for handler in logger.handlers):
+            handler = RotatingFileHandler(native_log, maxBytes=2 * 1024 * 1024,
+                                          backupCount=3, encoding='utf-8')
+            handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+            logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        return native_log
+    except Exception:
+        logger.exception('Could not configure Focus Mode log file')
+        return None
 
 # Safety defaults: default to NOT forcing a global dry-run.
 import os
@@ -128,27 +152,10 @@ try:
             signal.signal(sig, lambda s, f: (_exit_all_focus_modes(), os._exit(0)))
         except Exception:
             pass
-        # Ensure the focus logger is available and set test-friendly env vars
-        try:
-            _ensure_focus_logger()
-        except Exception:
-            pass
-
-        try:
-            allow_purge = _unsafe_allowed_for_instance(instance)
-            if allow_purge:
-                os.environ['FORZEOS_ALLOW_STANDBY_PURGE'] = '1'
-            # instance override or test-mode shorter interval
-            ti = settings.get('focus_trim_interval_seconds', None)
-            if ti is None and os.environ.get('FORZEOS_FOCUS_TEST') == '1':
-                ti = 30
-            if ti is not None:
-                os.environ['FORZEOS_TRIM_INTERVAL_SECONDS'] = str(int(ti))
-            logger.info('Aggressive start env: ALLOW_STANDBY_PURGE=%s TRIM_INTERVAL=%s', os.environ.get('FORZEOS_ALLOW_STANDBY_PURGE'), os.environ.get('FORZEOS_TRIM_INTERVAL_SECONDS'))
-        except Exception:
-            pass
 except Exception:
     pass
+
+_ensure_focus_logger()
 
 def _find_aggressive_dll_path():
     try:
@@ -275,6 +282,12 @@ def _load_aggressive_dll():
             logger.error('Aggressive Focus DLL has obsolete exports; rebuild it from forze_aggressive_focus.cpp')
             _aggressive = None
             return False
+        # [FIX-1] Oyun adini DLL'e iletmek icin ForzeEngineAddGame export'u (ortam degiskenini DLL okumuyor)
+        try:
+            _aggressive.ForzeEngineAddGame.argtypes = [ctypes.c_char_p]
+            _aggressive.ForzeEngineAddGame.restype = ctypes.c_int
+        except AttributeError:
+            pass
         logger.info('Aggressive Focus native module loaded: %s', path)
         # cleanup add_dll_directory handle if we created one
         try:
@@ -323,27 +336,37 @@ def _try_build_aggressive_dll() -> bool:
     # prefer MSVC if available
     cl = shutil.which('cl')
     if cl:
-        # MSVC: link every direct Win32 dependency used by the transparent module.
-        cmd = ['cl', '/std:c++17', '/LD', src, 'psapi.lib', 'winmm.lib', 'powrprof.lib', 'avrt.lib', 'advapi32.lib', '/link', f'/OUT:{out}']
+        cmd = ['cl', '/std:c++17', '/D_WIN32_WINNT=0x0A00', '/DWINVER=0x0A00',
+               '/LD', src, 'winmm.lib', '/link', f'/OUT:{out}']
         try:
             logger.info('Attempting to build aggressive DLL with MSVC: %s', ' '.join(cmd))
             p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False, cwd=os.path.dirname(os.path.abspath(__file__)), timeout=120)
             logger.info('Build output: %s', p.stdout.decode(errors='ignore'))
-            return os.path.exists(out)
+            return p.returncode == 0 and os.path.exists(out)
         except Exception:
             logger.exception('MSVC build failed')
             # fallthrough to try g++
 
-    gpp = shutil.which('g++') or shutil.which('mingw32-g++')
-    if gpp:
-        # MinGW: attempt a static-linked DLL to reduce external dependencies where possible
-        # Note: static linking may not always be possible on all toolchains; this is best-effort.
-        cmd = [gpp, '-std=c++17', '-shared', '-o', out, src, '-lpsapi', '-lwinmm', '-lpowrprof', '-lavrt', '-ladvapi32', '-static', '-static-libgcc', '-static-libstdc++']
+    gpp = (shutil.which('g++') or shutil.which('x86_64-w64-mingw32-g++') or
+           shutil.which('mingw32-g++') or r'C:\msys64\mingw64\bin\g++.exe')
+    if gpp and (os.path.isfile(gpp) if os.path.isabs(gpp) else True):
+        build_env = os.environ.copy()
+        compiler_dir = os.path.dirname(os.path.abspath(gpp))
+        build_env['PATH'] = compiler_dir + os.pathsep + build_env.get('PATH', '')
+        # [FIX-4] psapi/advapi32/powrprof/pdh kutuphaneleri ve --kill-at eklendi (g++ #pragma comment(lib) desteklemez)
+        cmd = [gpp, '-std=c++17', '-O2', '-Wall', '-Wextra',
+               '-D_WIN32_WINNT=0x0A00', '-DWINVER=0x0A00', '-shared',
+               '-o', out, src,
+               '-lwinmm', '-lpsapi', '-ladvapi32', '-lpowrprof', '-lpdh',
+               '-static', '-static-libgcc', '-static-libstdc++',
+               '-Wl,--subsystem,windows,--kill-at']
         try:
             logger.info('Attempting to build aggressive DLL with g++: %s', ' '.join(cmd))
-            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False, cwd=os.path.dirname(os.path.abspath(__file__)), timeout=120)
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               shell=False, cwd=os.path.dirname(os.path.abspath(__file__)),
+                               env=build_env, timeout=120)
             logger.info('Build output: %s', p.stdout.decode(errors='ignore'))
-            return os.path.exists(out)
+            return p.returncode == 0 and os.path.exists(out)
         except Exception:
             logger.exception('g++ build failed')
 
@@ -352,11 +375,7 @@ def _try_build_aggressive_dll() -> bool:
 
 
 def enter_aggressive_focus_mode(instance):
-    """Attempt to enter an aggressive native-backed Focus Mode.
-
-    If the native DLL isn't present or fails to load, fall back to the
-    pure-Python `enter_focus_mode` so the user still gets a safe mode.
-    """
+    """Start the native process monitor once, without the legacy RAM-trim worker."""
     if not aggressive_available():
         msg = 'Aggressive Focus native module not available; falling back to Python Focus Mode.'
         logger.info(msg)
@@ -367,85 +386,82 @@ def enter_aggressive_focus_mode(instance):
             pass
         return enter_focus_mode(instance)
 
-    # call the native start routine (best-effort)
     try:
-        # Before invoking native DLL, feed runtime settings from instance.config
-        try:
-            cfg = getattr(instance, 'config', {}) or {}
-            settings = cfg.get('settings', {}) if isinstance(cfg, dict) else {}
-            # max trims
-            mt = settings.get('focus_max_trims', None)
-            if mt is not None:
-                os.environ['FORZEOS_MAX_TRIMS'] = str(int(mt))
-            # min rss MB
-            mr = settings.get('focus_min_rss_mb', None)
-            if mr is not None:
-                os.environ['FORZEOS_MIN_RSS_MB'] = str(int(mr))
-            # same session
-            ss = settings.get('focus_only_same_session', None)
-            if ss is not None:
-                os.environ['FORZEOS_ONLY_SAME_SESSION'] = '1' if bool(ss) else '0'
-            # whitelist/blacklist process name patterns (comma-separated)
-            wl = settings.get('focus_whitelist', None)
-            if wl is not None:
-                if isinstance(wl, (list, tuple)):
-                    os.environ['FORZEOS_WHITELIST_NAMES'] = ','.join(str(x) for x in wl)
-                else:
-                    os.environ['FORZEOS_WHITELIST_NAMES'] = str(wl)
-            bl = settings.get('focus_blacklist', None)
-            if bl is not None:
-                if isinstance(bl, (list, tuple)):
-                    os.environ['FORZEOS_BLACKLIST_NAMES'] = ','.join(str(x) for x in bl)
-                else:
-                    os.environ['FORZEOS_BLACKLIST_NAMES'] = str(bl)
-        except Exception:
-            pass
-        try:
-            res = _aggressive.ForzeStartAggressiveFocus()
-        except Exception:
-            res = 0
-        msg = f'Aggressive Focus native start returned: {res}'
+        cfg = getattr(instance, 'config', {}) or {}
+        settings = cfg.get('settings', {}) if isinstance(cfg, dict) else {}
+        log_path = _ensure_focus_logger()
+        if log_path:
+            os.environ['FORZEOS_FOCUS_NATIVE_LOG'] = log_path
+        game_name = str(settings.get('focus_game_process_name', '') or '').strip()
+        if game_name:
+            os.environ['FORZEOS_FOCUS_GAME_EXE'] = game_name
+        else:
+            os.environ.pop('FORZEOS_FOCUS_GAME_EXE', None)
+
+        # [FIX-1] Kullanicinin oyun adini DLL'in hedef oyun listesine ekle
+        if game_name:
+            try:
+                _aggressive.ForzeEngineAddGame(game_name.encode('utf-8'))
+            except Exception:
+                logger.exception('ForzeEngineAddGame failed')
+
+        res = int(_aggressive.ForzeStartAggressiveFocus())
+        msg = f'Aggressive Focus native start returned: {res}; game={game_name or "auto-detect"}'
         logger.info(msg)
-        try:
-            if hasattr(instance, 'notify'):
-                instance.notify(msg)
-        except Exception:
-            pass
+        if res != 1:
+            raise RuntimeError(msg)
     except Exception:
         logger.exception('Aggressive focus native start failed; falling back')
         return enter_focus_mode(instance)
 
-    # create a FocusModeState and annotate it as aggressive-engaged
-    state = enter_focus_mode(instance)
+    # Do not call enter_focus_mode(): its legacy worker may trim/suspend other
+    # processes and used to invoke the native DLL a second time.
+    state = FocusModeState()
+    state.active = True
+    state.before_ram = _measure_ram_used()
     try:
-        state.forzeos_saved['_aggressive_native'] = True
-        state.log('Aggressive Focus: native module engaged')
+        state.before_pct = psutil.virtual_memory().percent if psutil is not None else None
+    except Exception:
+        state.before_pct = None
+    state.forzeos_saved['_aggressive_native'] = True
+    state.log('Aggressive Focus native monitor started; changes are process-scoped and reversible')
+    instance._focus_state = state
+    _register_active_instance(instance)
+    try:
+        if hasattr(instance, 'notify'):
+            instance.notify('Aggressive Focus started. Game process tuning is being monitored.')
     except Exception:
         pass
     return state
 
 
 def exit_aggressive_focus_mode(instance) -> Optional[FocusModeState]:
-    """Exit aggressive focus: call native stop if present, then restore Python Focus Mode state."""
+    """Stop native tuning, restore all recorded process settings, and clear session state."""
     try:
+        state = getattr(instance, '_focus_state', None)
         if _aggressive is not None:
             try:
-                _aggressive.ForzeStopAggressiveFocus()
+                result = int(_aggressive.ForzeStopAggressiveFocus())
+                logger.info('Aggressive native stop returned: %s', result)
+                # [FIX-2] Native durdurma basarisizsa durumu temizleme, tekrar denenebilsin
+                if result != 1:
+                    logger.error('Native stop failed; keeping focus state for retry')
+                    return state
             except Exception:
                 logger.exception('Aggressive native stop failed')
-            else:
-                # Remove persistent reference so the DLL can unload
-                try:
-                    global _persistent_refs
-                    _persistent_refs = [r for r in _persistent_refs if r is not _aggressive]
-                except Exception:
-                    pass
-        # restore via Python exit_focus_mode
-        try:
-            return exit_focus_mode(instance)
-        except Exception:
-            logger.exception('exit_focus_mode failed during aggressive stop')
-            return None
+        if state is not None:
+            state.active = False
+            state.log('Aggressive Focus ended; native process settings restored')
+            try:
+                instance._focus_mode_log = list(state.log_lines)
+            except Exception:
+                pass
+            _unregister_active_instance(instance)
+            try:
+                del instance._focus_state
+            except Exception:
+                pass
+        return state
     except Exception:
         logger.exception('exit_aggressive_focus_mode fatal')
         return None
@@ -459,6 +475,13 @@ if IS_WINDOWS:
     ntdll = ctypes.WinDLL('ntdll', use_last_error=True)
 
     PROCESS_ALL_ACCESS = 0x1F0FFF
+    # [FIX-3] _suspend_process/_resume_process bu sabiti kullaniyor ama tanimli degildi (NameError sessizce yutuluyordu)
+    PROCESS_SET_INFORMATION = 0x0200 | 0x1000  # SET_INFORMATION + QUERY_LIMITED_INFORMATION (GetPriorityClass icin)
+
+    kernel32.GetPriorityClass.argtypes = [wintypes.HANDLE]
+    kernel32.GetPriorityClass.restype = wintypes.DWORD
+    kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.SetPriorityClass.restype = wintypes.BOOL
 
     OpenProcess = kernel32.OpenProcess
     OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -973,30 +996,6 @@ def _perform_focus_actions(instance, state: FocusModeState):
 
                         procs.sort(key=_proc_sort_key, reverse=True)
 
-                        # If aggressive native helper is available, kick it off once
-                        try:
-                            if aggressive_available() and _unsafe_allowed_for_instance(instance) and state._aggressive_trimmed == 0:
-                                def _call_aggr():
-                                    try:
-                                        res = 0
-                                        try:
-                                            try:
-                                                res = _aggressive.ForzeStartAggressiveFocus()
-                                            except Exception:
-                                                res = 0
-                                        except Exception:
-                                            res = 0
-                                        try:
-                                            state.forzeos_saved['_aggressive_trimmed_count'] = int(res)
-                                            state._aggressive_trimmed = int(res)
-                                        except Exception:
-                                            pass
-                                    except Exception:
-                                        pass
-                                threading.Thread(target=_call_aggr, daemon=True).start()
-                        except Exception:
-                            pass
-
                         # maintenance loop: one candidate per iteration
                         for cycle in range(maintenance_cycles):
                             if state.stop_event.is_set() or not state.active:
@@ -1217,6 +1216,10 @@ def exit_focus_mode(instance) -> Optional[FocusModeState]:
         if not state:
             logger.info('No active focus state found; nothing to restore')
             return None
+
+        # [FIX-2] Aggressive (native) oturum ise DLL motorunu da durdur; aksi halde arka plan kisitlari kalirdi
+        if isinstance(state.forzeos_saved, dict) and state.forzeos_saved.get('_aggressive_native'):
+            return exit_aggressive_focus_mode(instance)
 
         # signal the worker to stop and resume processes
         try:
